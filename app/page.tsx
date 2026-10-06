@@ -45,7 +45,7 @@ export default function Home() {
   const [proyectos, setProyectos] = useState<Proyecto[]>([])
   const [trabajadores, setTrabajadores] = useState<Trabajador[]>([])
   const [reportes, setReportes] = useState<ReporteOperativo[]>([])
-  const [cargando, setCargando] = useState(true)
+  const [copiado, setCopiado] = useState(false)
 
   // Formulario nuevo trabajador
   const [nombre, setNombre] = useState('')
@@ -63,7 +63,6 @@ export default function Home() {
   }, [])
 
   async function cargarDatos() {
-    setCargando(true)
     try {
       const { data: proys } = await supabase.from('proyectos').select('*').order('created_at', { ascending: false })
       const { data: trabs } = await supabase.from('trabajadores').select('*, proyectos(*)').order('nombre', { ascending: true })
@@ -74,12 +73,9 @@ export default function Home() {
       if (reps) setReportes(reps)
     } catch (err) {
       console.error('Error cargando datos:', err)
-    } finally {
-      setCargando(false)
     }
   }
 
-  // Verifica si el trabajador ya reportó el día de hoy
   function haReportadoHoy(trabajadorId: string) {
     const hoyStr = new Date().toISOString().split('T')[0]
     return reportes.find(r => r.trabajador_id === trabajadorId && r.created_at.startsWith(hoyStr))
@@ -88,6 +84,33 @@ export default function Home() {
   async function toggleActivoTrabajador(id: string, estadoActual: boolean) {
     await supabase.from('trabajadores').update({ activo: !estadoActual }).eq('id', id)
     cargarDatos()
+  }
+
+  function generarReporteDonJaime() {
+    const hoyStr = new Date().toLocaleDateString('es-CO', { dateStyle: 'long' })
+    let texto = `📊 *JHF PERFORACIONES - CONSOLIDADO DIARIO*\n📅 *Fecha:* ${hoyStr}\n\n`
+
+    trabajadores.filter(t => t.activo).forEach((t, index) => {
+      const rep = haReportadoHoy(t.id)
+      texto += `${index + 1}️⃣ *${t.nombre}* (${t.proyectos?.nombre || 'General'}):\n`
+
+      if (rep) {
+        if (rep.tipo_operacion === 'pilote') {
+          texto += `   • Pilote ${rep.pilote || 'N/A'}: PQ ${rep.avance_pq}m | Ensanche ${rep.ensanche}m | Camisa ${rep.encamisado}m\n`
+        } else if (rep.tipo_operacion === 'estudio_suelo') {
+          texto += `   • Sondeo ${rep.sondeo || 'N/A'}: ${rep.metros_nq}m NQ | ${rep.ensayos_spt} SPT\n`
+        } else {
+          texto += `   • Novedad / Actividad: ${rep.observaciones}\n`
+        }
+      } else {
+        texto += `   • ⏳ *Sin reporte registrado hoy*\n`
+      }
+      texto += `\n`
+    })
+
+    navigator.clipboard.writeText(texto)
+    setCopiado(true)
+    setTimeout(() => setCopiado(false), 3000)
   }
 
   async function crearTrabajador(e: React.FormEvent) {
@@ -126,7 +149,6 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
-      {/* Header */}
       <header className="border-b border-slate-800 bg-slate-900/50 backdrop-blur px-6 py-4 flex flex-wrap justify-between items-center gap-4">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-lg bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400 font-bold">
@@ -138,7 +160,6 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Pestañas */}
         <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-1 text-xs font-medium">
           <button
             onClick={() => setTab('monitor')}
@@ -150,7 +171,7 @@ export default function Home() {
             onClick={() => setTab('bitacora')}
             className={`px-3 py-1.5 rounded-md transition ${tab === 'bitacora' ? 'bg-sky-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
           >
-            📋 Bitácora de Reportes ({reportes.length})
+            📋 Bitácora ({reportes.length})
           </button>
           <button
             onClick={() => setTab('configuracion')}
@@ -161,25 +182,30 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Contenido Principal */}
       <main className="flex-1 p-6 max-w-7xl w-full mx-auto">
-        {/* PESTAÑA 1: MONITOR DE HOY */}
         {tab === 'monitor' && (
           <div className="space-y-6">
-            <div className="flex justify-between items-center">
+            <div className="flex flex-wrap justify-between items-center gap-3">
               <div>
-                <h2 className="text-base font-semibold text-white">Estado de Reportes de Hoy</h2>
-                <p className="text-xs text-slate-400">Monitoreo en tiempo real de frentes activos y pendientes</p>
+                <h2 className="text-base font-semibold text-white">Control de Jornada Diaria</h2>
+                <p className="text-xs text-slate-400">Monitoreo de operarios en obra y emisión de reportes</p>
               </div>
-              <button
-                onClick={cargarDatos}
-                className="text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded-md transition"
-              >
-                🔄 Actualizar
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={generarReporteDonJaime}
+                  className="text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-3.5 py-1.5 rounded-md transition flex items-center gap-1.5 shadow"
+                >
+                  {copiado ? '✅ ¡Copiado al Portapapeles!' : '📲 Copiar Resumen para Don Jaime'}
+                </button>
+                <button
+                  onClick={cargarDatos}
+                  className="text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded-md transition"
+                >
+                  🔄 Actualizar
+                </button>
+              </div>
             </div>
 
-            {/* Tarjetas de estado */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {trabajadores.map(t => {
                 const reporteHoy = haReportadoHoy(t.id)
@@ -200,14 +226,13 @@ export default function Home() {
                           <h3 className="font-semibold text-sm text-white">{t.nombre}</h3>
                           <p className="text-xs text-slate-400">+{t.telefono} • {t.cargo}</p>
                         </div>
-                        {/* Estado */}
                         {!t.activo ? (
                           <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
-                            En pausa hoy
+                            Pausado
                           </span>
                         ) : reporteHoy ? (
                           <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800 flex items-center gap-1">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Reportado
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Listo
                           </span>
                         ) : (
                           <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-950 text-amber-400 border border-amber-800 flex items-center gap-1">
@@ -217,14 +242,14 @@ export default function Home() {
                       </div>
 
                       <div className="text-xs text-slate-300 mt-2 bg-slate-950/40 p-2.5 rounded border border-slate-800/80">
-                        <div className="text-[11px] text-slate-400">Frente de Obra:</div>
+                        <div className="text-[11px] text-slate-400">Frente:</div>
                         <div className="font-medium text-sky-400">{t.proyectos?.nombre || 'General'}</div>
 
                         {reporteHoy && (
                           <div className="mt-2 pt-2 border-t border-slate-800/60">
-                            <div className="text-[11px] text-emerald-400 font-medium">Último reporte:</div>
+                            <div className="text-[11px] text-emerald-400 font-medium">Avance asentado:</div>
                             <div className="text-[11px] text-slate-300 line-clamp-2 mt-0.5">
-                              {reporteHoy.observaciones || 'Reporte asentado'}
+                              {reporteHoy.observaciones || 'Reporte consolidado'}
                             </div>
                           </div>
                         )}
@@ -241,7 +266,7 @@ export default function Home() {
                             : 'bg-emerald-950/40 hover:bg-emerald-900/50 text-emerald-300 border border-emerald-800/50'
                         }`}
                       >
-                        {t.activo ? 'Pausar envío' : 'Activar envío'}
+                        {t.activo ? 'Pausar hoy' : 'Activar'}
                       </button>
                     </div>
                   </div>
@@ -251,7 +276,6 @@ export default function Home() {
           </div>
         )}
 
-        {/* PESTAÑA 2: BITÁCORA DE REPORTES */}
         {tab === 'bitacora' && (
           <div className="space-y-4">
             <div className="flex justify-between items-center">
@@ -318,10 +342,8 @@ export default function Home() {
           </div>
         )}
 
-        {/* PESTAÑA 3: CONFIGURACIÓN DE PERSONAL Y OBRAS */}
         {tab === 'configuracion' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Registro de Trabajador */}
             <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
               <h3 className="text-sm font-semibold text-white mb-1">Registrar Operador en WhatsApp</h3>
               <p className="text-xs text-slate-400 mb-4">El bot solo responderá a números autorizados en esta lista.</p>
@@ -341,13 +363,13 @@ export default function Home() {
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-slate-400 mb-1">Teléfono (con indicativo o local)</label>
+                    <label className="block text-slate-400 mb-1">Teléfono</label>
                     <input
                       type="text"
                       required
                       value={telefono}
                       onChange={e => setTelefono(e.target.value)}
-                      placeholder="Ej: 3209511767 o 57320..."
+                      placeholder="Ej: 3209511767"
                       className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
                     />
                   </div>
@@ -403,7 +425,6 @@ export default function Home() {
               </form>
             </div>
 
-            {/* Crear Obra */}
             <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
               <h3 className="text-sm font-semibold text-white mb-1">Crear Frente de Trabajo / Proyecto</h3>
               <p className="text-xs text-slate-400 mb-4">Proyectos activos para asociación en bitácora.</p>
