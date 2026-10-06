@@ -1,5 +1,7 @@
 'use client'
 
+export const dynamic = 'force-dynamic'
+
 import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 
@@ -26,12 +28,10 @@ export default function ConsolaAdmin() {
   const [trabajadores, setTrabajadores] = useState<Trabajador[]>([])
   const [cargando, setCargando] = useState(true)
 
-  // Estados formulario Proyecto
   const [nombreProyecto, setNombreProyecto] = useState('')
   const [fechaInicio, setFechaInicio] = useState(new Date().toISOString().split('T')[0])
   const [fechaFin, setFechaFin] = useState('')
 
-  // Estados formulario Trabajador
   const [nombreTrabajador, setNombreTrabajador] = useState('')
   const [telefonoTrabajador, setTelefonoTrabajador] = useState('')
   const [proyectoSeleccionado, setProyectoSeleccionado] = useState('')
@@ -76,7 +76,6 @@ export default function ConsolaAdmin() {
     e.preventDefault()
     if (!nombreTrabajador || !telefonoTrabajador) return
 
-    // Limpiar número: quitar espacios y signos +
     const cleanPhone = telefonoTrabajador.replace(/\D/g, '')
 
     await supabase.from('trabajadores').insert({
@@ -105,7 +104,6 @@ export default function ConsolaAdmin() {
       </header>
 
       <main className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-8">
-        {/* SECCIÓN PROYECTOS */}
         <section className="bg-slate-900 border border-slate-800 rounded-xl p-6">
           <h2 className="text-xl font-semibold mb-4 text-emerald-400">1. Gestión de Proyectos</h2>
           
@@ -175,7 +173,6 @@ export default function ConsolaAdmin() {
           </div>
         </section>
 
-        {/* SECCIÓN TRABAJADORES */}
         <section className="bg-slate-900 border border-slate-800 rounded-xl p-6">
           <h2 className="text-xl font-semibold mb-4 text-sky-400">2. Trabajadores y Reglas de Envío</h2>
 
