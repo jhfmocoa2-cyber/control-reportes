@@ -23,15 +23,33 @@ interface Trabajador {
   proyectos?: { nombre: string }
 }
 
+interface Reporte {
+  id: string
+  created_at: string
+  trabajador_nombre: string
+  proyecto_nombre: string
+  pilote: string
+  avance_pq: number
+  ensanche: number
+  encamisado: number
+  observaciones: string
+  confirmado: boolean
+}
+
 export default function ConsolaAdmin() {
+  const [tab, setTab] = useState<'config' | 'reportes'>('config')
   const [proyectos, setProyectos] = useState<Proyecto[]>([])
   const [trabajadores, setTrabajadores] = useState<Trabajador[]>([])
-  const [cargando, setCargando] = useState(true)
-
+  const [reportes, setReportes] = useState<Reporte[]>([])
+  
+  // Form proyecto
+  const [editingProyectoId, setEditingProyectoId] = useState<string | null>(null)
   const [nombreProyecto, setNombreProyecto] = useState('')
   const [fechaInicio, setFechaInicio] = useState(new Date().toISOString().split('T')[0])
   const [fechaFin, setFechaFin] = useState('')
 
+  // Form trabajador
+  const [editingTrabajadorId, setEditingTrabajadorId] = useState<string | null>(null)
   const [nombreTrabajador, setNombreTrabajador] = useState('')
   const [telefonoTrabajador, setTelefonoTrabajador] = useState('')
   const [proyectoSeleccionado, setProyectoSeleccionado] = useState('')
@@ -42,223 +60,358 @@ export default function ConsolaAdmin() {
   }, [])
 
   async function cargarDatos() {
-    setCargando(true)
     const { data: proys } = await supabase.from('proyectos').select('*').order('created_at', { ascending: false })
     const { data: trabs } = await supabase.from('trabajadores').select('*, proyectos(nombre)').order('created_at', { ascending: false })
+    const { data: reps } = await supabase.from('reportes_operativos').select('*').order('created_at', { ascending: false })
 
     if (proys) setProyectos(proys)
     if (trabs) setTrabajadores(trabs as any)
-    setCargando(false)
+    if (reps) setReportes(reps)
   }
 
-  async function crearProyecto(e: React.FormEvent) {
+  async function guardarProyecto(e: React.FormEvent) {
     e.preventDefault()
     if (!nombreProyecto) return
 
-    await supabase.from('proyectos').insert({
-      nombre: nombreProyecto,
-      fecha_inicio: fechaInicio,
-      fecha_fin: fechaFin || null,
-      activo: true
-    })
+    if (editingProyectoId) {
+      await supabase.from('proyectos').update({
+        nombre: nombreProyecto,
+        fecha_inicio: fechaInicio,
+        fecha_fin: fechaFin || null
+      }).eq('id', editingProyectoId)
+      setEditingProyectoId(null)
+    } else {
+      await supabase.from('proyectos').insert({
+        nombre: nombreProyecto,
+        fecha_inicio: fechaInicio,
+        fecha_fin: fechaFin || null,
+        activo: true
+      })
+    }
 
     setNombreProyecto('')
     setFechaFin('')
     cargarDatos()
   }
 
-  async function toggleProyecto(id: string, activoActual: boolean) {
-    await supabase.from('proyectos').update({ activo: !activoActual }).eq('id', id)
+  function prepararEdicionProyecto(p: Proyecto) {
+    setEditingProyectoId(p.id)
+    setNombreProyecto(p.nombre)
+    setFechaInicio(p.fecha_inicio)
+    setFechaFin(p.fecha_fin || '')
+  }
+
+  async function eliminarProyecto(id: string) {
+    if (!confirm('¿Deseas eliminar este proyecto? Los reportes asociados podrían quedar sin referencia.')) return
+    await supabase.from('proyectos').delete().eq('id', id)
     cargarDatos()
   }
 
-  async function crearTrabajador(e: React.FormEvent) {
+  async function guardarTrabajador(e: React.FormEvent) {
     e.preventDefault()
     if (!nombreTrabajador || !telefonoTrabajador) return
 
     const cleanPhone = telefonoTrabajador.replace(/\D/g, '')
 
-    await supabase.from('trabajadores').insert({
-      nombre: nombreTrabajador,
-      telefono: cleanPhone,
-      proyecto_id: proyectoSeleccionado || null,
-      jornada: jornadaTrabajador,
-      activo: true
-    })
+    if (editingTrabajadorId) {
+      await supabase.from('trabajadores').update({
+        nombre: nombreTrabajador,
+        telefono: cleanPhone,
+        proyecto_id: proyectoSeleccionado || null,
+        jornada: jornadaTrabajador
+      }).eq('id', editingTrabajadorId)
+      setEditingTrabajadorId(null)
+    } else {
+      await supabase.from('trabajadores').insert({
+        nombre: nombreTrabajador,
+        telefono: cleanPhone,
+        proyecto_id: proyectoSeleccionado || null,
+        jornada: jornadaTrabajador,
+        activo: true
+      })
+    }
 
     setNombreTrabajador('')
     setTelefonoTrabajador('')
+    setProyectoSeleccionado('')
     cargarDatos()
   }
 
-  async function toggleTrabajador(id: string, activoActual: boolean) {
-    await supabase.from('trabajadores').update({ activo: !activoActual }).eq('id', id)
+  function prepararEdicionTrabajador(t: Trabajador) {
+    setEditingTrabajadorId(t.id)
+    setNombreTrabajador(t.nombre)
+    setTelefonoTrabajador(t.telefono)
+    setProyectoSeleccionado(t.proyecto_id || '')
+    setJornadaTrabajador(t.jornada)
+  }
+
+  async function eliminarTrabajador(id: string) {
+    if (!confirm('¿Eliminar trabajador del directorio?')) return
+    await supabase.from('trabajadores').delete().eq('id', id)
     cargarDatos()
+  }
+
+  function exportarCSV() {
+    if (reportes.length === 0) return alert('No hay reportes para exportar')
+    const cabecera = 'Fecha,Proyecto,Trabajador,Pilote,Metros PQ,Ensanche,Encamisado,Observaciones\n'
+    const filas = reportes.map(r => 
+      `"${r.created_at.slice(0,10)}","${r.proyecto_nombre}","${r.trabajador_nombre}","${r.pilote}",${r.avance_pq},${r.ensanche},${r.encamisado},"${r.observaciones || ''}"`
+    ).join('\n')
+
+    const blob = new Blob([cabecera + filas], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.setAttribute('download', `reportes_perforacion_${new Date().toISOString().split('T')[0]}.csv`)
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
   }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-6 md:p-10 font-sans">
-      <header className="max-w-6xl mx-auto mb-10 pb-6 border-b border-slate-800">
-        <h1 className="text-3xl font-bold tracking-tight">Panel de Control: Reportes Operativos</h1>
-        <p className="text-slate-400 mt-1">Administra proyectos, personal asignado y regímenes de jornada.</p>
+      <header className="max-w-6xl mx-auto mb-8 pb-6 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Control Operativo de Frentes</h1>
+          <p className="text-slate-400 mt-1">Supervisión de perforación, pilotes y recopilación por WhatsApp.</p>
+        </div>
+        <div className="flex gap-2 bg-slate-900 p-1 border border-slate-800 rounded-lg">
+          <button
+            onClick={() => setTab('config')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition ${
+              tab === 'config' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            Frentes y Personal
+          </button>
+          <button
+            onClick={() => setTab('reportes')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition ${
+              tab === 'reportes' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            Bitácora de Reportes
+          </button>
+        </div>
       </header>
 
-      <main className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-8">
-        <section className="bg-slate-900 border border-slate-800 rounded-xl p-6">
-          <h2 className="text-xl font-semibold mb-4 text-emerald-400">1. Gestión de Proyectos</h2>
-          
-          <form onSubmit={crearProyecto} className="space-y-4 mb-6 bg-slate-800/50 p-4 rounded-lg">
-            <div>
-              <label className="block text-xs uppercase tracking-wider text-slate-400 mb-1">Nombre del Proyecto</label>
-              <input
-                type="text"
-                placeholder="Ej. Sondeos Fase 2 Mocoa"
-                value={nombreProyecto}
-                onChange={e => setNombreProyecto(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
-                required
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs uppercase tracking-wider text-slate-400 mb-1">Fecha Inicio</label>
+      <main className="max-w-6xl mx-auto">
+        {tab === 'config' ? (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            {/* PROYECTOS */}
+            <section className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-semibold text-emerald-400">Proyectos y Obras</h2>
+                {editingProyectoId && (
+                  <button onClick={() => { setEditingProyectoId(null); setNombreProyecto(''); }} className="text-xs text-slate-400 underline">
+                    Cancelar edición
+                  </button>
+                )}
+              </div>
+              
+              <form onSubmit={guardarProyecto} className="space-y-4 mb-6 bg-slate-800/50 p-4 rounded-lg">
                 <input
-                  type="date"
-                  value={fechaInicio}
-                  onChange={e => setFechaInicio(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white focus:outline-none"
+                  type="text"
+                  placeholder="Nombre de la obra (Ej. Pilotes Medellín)"
+                  value={nombreProyecto}
+                  onChange={e => setNombreProyecto(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white"
                   required
                 />
+                <div className="grid grid-cols-2 gap-3">
+                  <input
+                    type="date"
+                    value={fechaInicio}
+                    onChange={e => setFechaInicio(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white"
+                    required
+                  />
+                  <input
+                    type="date"
+                    placeholder="Fecha fin"
+                    value={fechaFin}
+                    onChange={e => setFechaFin(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white"
+                  />
+                </div>
+                <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded-md text-sm font-medium transition">
+                  {editingProyectoId ? 'Guardar Cambios' : 'Registrar Proyecto'}
+                </button>
+              </form>
+
+              <div className="space-y-3">
+                {proyectos.map(p => (
+                  <div key={p.id} className="p-3 bg-slate-950 border border-slate-800 rounded-lg flex justify-between items-center">
+                    <div>
+                      <p className="font-medium text-white">{p.nombre}</p>
+                      <p className="text-xs text-slate-500">{p.fecha_inicio} {p.fecha_fin ? `al ${p.fecha_fin}` : '(En curso)'}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => prepararEdicionProyecto(p)} className="text-xs text-slate-400 hover:text-white px-2 py-1">
+                        Editar
+                      </button>
+                      <button
+                        onClick={async () => {
+                          await supabase.from('proyectos').update({ activo: !p.activo }).eq('id', p.id)
+                          cargarDatos()
+                        }}
+                        className={`text-xs px-2.5 py-1 rounded-md font-medium ${
+                          p.activo ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-red-950 text-red-400 border border-red-800'
+                        }`}
+                      >
+                        {p.activo ? 'Activo' : 'Cerrado'}
+                      </button>
+                      <button onClick={() => eliminarProyecto(p.id)} className="text-xs text-red-400 hover:text-red-300 px-2 py-1">
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
-              <div>
-                <label className="block text-xs uppercase tracking-wider text-slate-400 mb-1">Fecha Fin (Opcional)</label>
+            </section>
+
+            {/* TRABAJADORES */}
+            <section className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-semibold text-sky-400">Perforadores y Operadores</h2>
+                {editingTrabajadorId && (
+                  <button onClick={() => { setEditingTrabajadorId(null); setNombreTrabajador(''); setTelefonoTrabajador(''); }} className="text-xs text-slate-400 underline">
+                    Cancelar edición
+                  </button>
+                )}
+              </div>
+
+              <form onSubmit={guardarTrabajador} className="space-y-4 mb-6 bg-slate-800/50 p-4 rounded-lg">
                 <input
-                  type="date"
-                  value={fechaFin}
-                  onChange={e => setFechaFin(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white focus:outline-none"
+                  type="text"
+                  placeholder="Nombre completo"
+                  value={nombreTrabajador}
+                  onChange={e => setNombreTrabajador(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white"
+                  required
                 />
-              </div>
-            </div>
-            <button
-              type="submit"
-              className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2 rounded-md transition text-sm"
-            >
-              Registrar Proyecto
-            </button>
-          </form>
-
-          <div className="space-y-3">
-            <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Proyectos Existentes</h3>
-            {proyectos.length === 0 ? (
-              <p className="text-sm text-slate-500">No hay proyectos registrados aún.</p>
-            ) : (
-              proyectos.map(p => (
-                <div key={p.id} className="flex items-center justify-between p-3 bg-slate-950 border border-slate-800 rounded-lg">
-                  <div>
-                    <p className="font-medium text-white">{p.nombre}</p>
-                    <p className="text-xs text-slate-500">{p.fecha_inicio} {p.fecha_fin ? `al ${p.fecha_fin}` : '(Indefinido)'}</p>
-                  </div>
-                  <button
-                    onClick={() => toggleProyecto(p.id, p.activo)}
-                    className={`text-xs px-3 py-1 rounded-full font-medium transition ${
-                      p.activo ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-red-950 text-red-400 border border-red-800'
-                    }`}
+                <input
+                  type="text"
+                  placeholder="WhatsApp (con país, ej: 573103953485)"
+                  value={telefonoTrabajador}
+                  onChange={e => setTelefonoTrabajador(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white"
+                  required
+                />
+                <div className="grid grid-cols-2 gap-3">
+                  <select
+                    value={proyectoSeleccionado}
+                    onChange={e => setProyectoSeleccionado(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white"
                   >
-                    {p.activo ? 'Activo' : 'Cerrado'}
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-        </section>
-
-        <section className="bg-slate-900 border border-slate-800 rounded-xl p-6">
-          <h2 className="text-xl font-semibold mb-4 text-sky-400">2. Trabajadores y Reglas de Envío</h2>
-
-          <form onSubmit={crearTrabajador} className="space-y-4 mb-6 bg-slate-800/50 p-4 rounded-lg">
-            <div>
-              <label className="block text-xs uppercase tracking-wider text-slate-400 mb-1">Nombre Completo</label>
-              <input
-                type="text"
-                placeholder="Ej. Juan Pérez"
-                value={nombreTrabajador}
-                onChange={e => setNombreTrabajador(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white focus:outline-none focus:border-sky-500"
-                required
-              />
-            </div>
-            <div>
-              <label className="block text-xs uppercase tracking-wider text-slate-400 mb-1">WhatsApp (con código país)</label>
-              <input
-                type="text"
-                placeholder="Ej. 573001234567"
-                value={telefonoTrabajador}
-                onChange={e => setTelefonoTrabajador(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white focus:outline-none focus:border-sky-500"
-                required
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs uppercase tracking-wider text-slate-400 mb-1">Proyecto Asignado</label>
-                <select
-                  value={proyectoSeleccionado}
-                  onChange={e => setProyectoSeleccionado(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white focus:outline-none"
-                >
-                  <option value="">Sin asignar</option>
-                  {proyectos.filter(p => p.activo).map(p => (
-                    <option key={p.id} value={p.id}>{p.nombre}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs uppercase tracking-wider text-slate-400 mb-1">Jornada</label>
-                <select
-                  value={jornadaTrabajador}
-                  onChange={e => setJornadaTrabajador(e.target.value as 'L-V' | 'L-S')}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white focus:outline-none"
-                >
-                  <option value="L-V">Lunes a Viernes</option>
-                  <option value="L-S">Lunes a Sábado</option>
-                </select>
-              </div>
-            </div>
-            <button
-              type="submit"
-              className="w-full bg-sky-600 hover:bg-sky-500 text-white font-medium py-2 rounded-md transition text-sm"
-            >
-              Registrar Trabajador
-            </button>
-          </form>
-
-          <div className="space-y-3">
-            <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Directorio Activo</h3>
-            {trabajadores.length === 0 ? (
-              <p className="text-sm text-slate-500">No hay trabajadores agregados.</p>
-            ) : (
-              trabajadores.map(t => (
-                <div key={t.id} className="flex items-center justify-between p-3 bg-slate-950 border border-slate-800 rounded-lg">
-                  <div>
-                    <p className="font-medium text-white">{t.nombre}</p>
-                    <p className="text-xs text-slate-500">
-                      +{t.telefono} | {t.proyectos?.nombre || 'Sin proyecto'} | <span className="text-sky-400">{t.jornada}</span>
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => toggleTrabajador(t.id, t.activo)}
-                    className={`text-xs px-3 py-1 rounded-full font-medium transition ${
-                      t.activo ? 'bg-sky-950 text-sky-400 border border-sky-800' : 'bg-slate-800 text-slate-400 border border-slate-700'
-                    }`}
+                    <option value="">Sin asignar</option>
+                    {proyectos.filter(p => p.activo).map(p => (
+                      <option key={p.id} value={p.id}>{p.nombre}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={jornadaTrabajador}
+                    onChange={e => setJornadaTrabajador(e.target.value as any)}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white"
                   >
-                    {t.activo ? 'Activo' : 'En pausa'}
-                  </button>
+                    <option value="L-V">Lunes a Viernes</option>
+                    <option value="L-S">Lunes a Sábado</option>
+                  </select>
                 </div>
-              ))
-            )}
+                <button type="submit" className="w-full bg-sky-600 hover:bg-sky-500 text-white py-2 rounded-md text-sm font-medium transition">
+                  {editingTrabajadorId ? 'Guardar Cambios' : 'Registrar Perforador'}
+                </button>
+              </form>
+
+              <div className="space-y-3">
+                {trabajadores.map(t => (
+                  <div key={t.id} className="p-3 bg-slate-950 border border-slate-800 rounded-lg flex justify-between items-center">
+                    <div>
+                      <p className="font-medium text-white">{t.nombre}</p>
+                      <p className="text-xs text-slate-500">+{t.telefono} | {t.proyectos?.nombre || 'Sin obra'} | <span className="text-sky-400">{t.jornada}</span></p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => prepararEdicionTrabajador(t)} className="text-xs text-slate-400 hover:text-white px-2 py-1">
+                        Editar
+                      </button>
+                      <button
+                        onClick={async () => {
+                          await supabase.from('trabajadores').update({ activo: !t.activo }).eq('id', t.id)
+                          cargarDatos()
+                        }}
+                        className={`text-xs px-2.5 py-1 rounded-md font-medium ${
+                          t.activo ? 'bg-sky-950 text-sky-400 border border-sky-800' : 'bg-slate-800 text-slate-400 border border-slate-700'
+                        }`}
+                      >
+                        {t.activo ? 'Activo' : 'Pausa'}
+                      </button>
+                      <button onClick={() => eliminarTrabajador(t.id)} className="text-xs text-red-400 hover:text-red-300 px-2 py-1">
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
           </div>
-        </section>
+        ) : (
+          /* BITÁCORA DE REPORTES */
+          <section className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
+              <div>
+                <h2 className="text-xl font-semibold text-white">Historial de Reportes Diarios</h2>
+                <p className="text-xs text-slate-400 mt-0.5">Avances de PQ, ensanches y encamisados procesados.</p>
+              </div>
+              <button
+                onClick={exportarCSV}
+                className="bg-emerald-700 hover:bg-emerald-600 text-white px-4 py-2 rounded-md text-xs font-semibold uppercase tracking-wider transition self-start sm:self-auto"
+              >
+                Descargar Excel (CSV)
+              </button>
+            </div>
+
+            {reportes.length === 0 ? (
+              <div className="text-center py-12 border border-dashed border-slate-800 rounded-lg text-slate-500 text-sm">
+                Aún no hay reportes recibidos hoy. Los reportes validados por WhatsApp aparecerán aquí automáticamente.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm text-slate-300">
+                  <thead className="bg-slate-950 text-xs uppercase text-slate-400 border-b border-slate-800">
+                    <tr>
+                      <th className="p-3">Fecha</th>
+                      <th className="p-3">Frente / Obra</th>
+                      <th className="p-3">Perforador</th>
+                      <th className="p-3">Pilote</th>
+                      <th className="p-3">Avance PQ</th>
+                      <th className="p-3">Ensanche</th>
+                      <th className="p-3">Encamisado</th>
+                      <th className="p-3">Estado</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {reportes.map(r => (
+                      <tr key={r.id} className="hover:bg-slate-800/40">
+                        <td className="p-3 text-xs">{r.created_at.slice(0, 10)}</td>
+                        <td className="p-3 font-medium text-white">{r.proyecto_nombre}</td>
+                        <td className="p-3">{r.trabajador_nombre}</td>
+                        <td className="p-3 text-sky-400 font-semibold">{r.pilote}</td>
+                        <td className="p-3">{r.avance_pq} m</td>
+                        <td className="p-3">{r.ensanche} m</td>
+                        <td className="p-3">{r.encamisado} m</td>
+                        <td className="p-3">
+                          <span className="text-xs px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800">
+                            Validado
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        )}
       </main>
     </div>
   )
