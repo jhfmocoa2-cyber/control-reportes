@@ -19,6 +19,7 @@ interface Trabajador {
   cargo: string
   activo: boolean
   jornada: string
+  estado_conversacion?: string
   proyectos?: Proyecto
 }
 
@@ -45,7 +46,8 @@ export default function Home() {
   const [proyectos, setProyectos] = useState<Proyecto[]>([])
   const [trabajadores, setTrabajadores] = useState<Trabajador[]>([])
   const [reportes, setReportes] = useState<ReporteOperativo[]>([])
-  const [copiado, setCopiado] = useState(false)
+  const [ejecutando, setEjecutando] = useState(false)
+  const [mensajeEstado, setMensajeEstado] = useState('')
 
   // Formulario nuevo trabajador
   const [nombre, setNombre] = useState('')
@@ -86,31 +88,41 @@ export default function Home() {
     cargarDatos()
   }
 
-  function generarReporteDonJaime() {
-    const hoyStr = new Date().toLocaleDateString('es-CO', { dateStyle: 'long' })
-    let texto = `📊 *JHF PERFORACIONES - CONSOLIDADO DIARIO*\n📅 *Fecha:* ${hoyStr}\n\n`
-
-    trabajadores.filter(t => t.activo).forEach((t, index) => {
-      const rep = haReportadoHoy(t.id)
-      texto += `${index + 1}️⃣ *${t.nombre}* (${t.proyectos?.nombre || 'General'}):\n`
-
-      if (rep) {
-        if (rep.tipo_operacion === 'pilote') {
-          texto += `   • Pilote ${rep.pilote || 'N/A'}: PQ ${rep.avance_pq}m | Ensanche ${rep.ensanche}m | Camisa ${rep.encamisado}m\n`
-        } else if (rep.tipo_operacion === 'estudio_suelo') {
-          texto += `   • Sondeo ${rep.sondeo || 'N/A'}: ${rep.metros_nq}m NQ | ${rep.ensayos_spt} SPT\n`
-        } else {
-          texto += `   • Novedad / Actividad: ${rep.observaciones}\n`
-        }
+  // Disparador manual para verificar envíos en tiempo real
+  async function dispararRondaAhora() {
+    setEjecutando(true)
+    setMensajeEstado('Enviando mensajes de WhatsApp a los operarios activos...')
+    try {
+      const res = await fetch('/api/cron/solicitar-reportes')
+      const data = await res.json()
+      if (data.status === 'reminders_sent') {
+        setMensajeEstado('✅ Ronda enviada con éxito a todos los frentes activos.')
       } else {
-        texto += `   • ⏳ *Sin reporte registrado hoy*\n`
+        setMensajeEstado(`ℹ️ Estado: ${data.status}`)
       }
-      texto += `\n`
-    })
+      cargarDatos()
+    } catch (err: any) {
+      setMensajeEstado(`❌ Error al enviar: ${err.message}`)
+    } finally {
+      setEjecutando(false)
+      setTimeout(() => setMensajeEstado(''), 6000)
+    }
+  }
 
-    navigator.clipboard.writeText(texto)
-    setCopiado(true)
-    setTimeout(() => setCopiado(false), 3000)
+  // Disparador manual para enviar el consolidado ejecutivo
+  async function dispararConsolidadoAhora() {
+    setEjecutando(true)
+    setMensajeEstado('Enviando consolidado a Don Jaime y Miguel...')
+    try {
+      const res = await fetch('/api/cron/enviar-consolidado')
+      const data = await res.json()
+      setMensajeEstado(`✅ Consolidado despachado a ${data.recipients || 2} administradores.`)
+    } catch (err: any) {
+      setMensajeEstado(`❌ Error al enviar: ${err.message}`)
+    } finally {
+      setEjecutando(false)
+      setTimeout(() => setMensajeEstado(''), 6000)
+    }
   }
 
   async function crearTrabajador(e: React.FormEvent) {
@@ -183,19 +195,33 @@ export default function Home() {
       </header>
 
       <main className="flex-1 p-6 max-w-7xl w-full mx-auto">
+        {mensajeEstado && (
+          <div className="mb-4 p-3 bg-sky-950/80 border border-sky-600 text-sky-200 text-xs rounded-lg flex items-center justify-between">
+            <span>{mensajeEstado}</span>
+          </div>
+        )}
+
         {tab === 'monitor' && (
           <div className="space-y-6">
             <div className="flex flex-wrap justify-between items-center gap-3">
               <div>
                 <h2 className="text-base font-semibold text-white">Control de Jornada Diaria</h2>
-                <p className="text-xs text-slate-400">Monitoreo de operarios en obra y emisión de reportes</p>
+                <p className="text-xs text-slate-400">Inicio de ronda: 6:30 PM | Consolidado: 8:00 PM</p>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
-                  onClick={generarReporteDonJaime}
-                  className="text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-3.5 py-1.5 rounded-md transition flex items-center gap-1.5 shadow"
+                  disabled={ejecutando}
+                  onClick={dispararRondaAhora}
+                  className="text-xs bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-medium px-3 py-1.5 rounded-md transition shadow"
                 >
-                  {copiado ? '✅ ¡Copiado al Portapapeles!' : '📲 Copiar Resumen para Don Jaime'}
+                  🚀 Disparar Ronda Ahora
+                </button>
+                <button
+                  disabled={ejecutando}
+                  onClick={dispararConsolidadoAhora}
+                  className="text-xs bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-medium px-3 py-1.5 rounded-md transition shadow"
+                >
+                  📲 Enviar Consolidado a Jefatura
                 </button>
                 <button
                   onClick={cargarDatos}
@@ -209,6 +235,8 @@ export default function Home() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {trabajadores.map(t => {
                 const reporteHoy = haReportadoHoy(t.id)
+                const esperandoReporte = t.estado_conversacion === 'esperando_reporte_diario'
+
                 return (
                   <div
                     key={t.id}
@@ -228,11 +256,15 @@ export default function Home() {
                         </div>
                         {!t.activo ? (
                           <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
-                            Pausado
+                            Pausado hoy
                           </span>
                         ) : reporteHoy ? (
                           <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800 flex items-center gap-1">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Listo
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Reportado
+                          </span>
+                        ) : esperandoReporte ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-sky-950 text-sky-400 border border-sky-800 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-ping" /> Contactado
                           </span>
                         ) : (
                           <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-950 text-amber-400 border border-amber-800 flex items-center gap-1">
@@ -242,7 +274,7 @@ export default function Home() {
                       </div>
 
                       <div className="text-xs text-slate-300 mt-2 bg-slate-950/40 p-2.5 rounded border border-slate-800/80">
-                        <div className="text-[11px] text-slate-400">Frente:</div>
+                        <div className="text-[11px] text-slate-400">Frente de Trabajo:</div>
                         <div className="font-medium text-sky-400">{t.proyectos?.nombre || 'General'}</div>
 
                         {reporteHoy && (
