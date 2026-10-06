@@ -31,7 +31,7 @@ export async function POST(req: Request) {
     const cleanFrom = from.replace(/\D/g, '')
     const localPhone = cleanFrom.startsWith('57') ? cleanFrom.slice(2) : cleanFrom
 
-    // 1. Identificar trabajador activo en Supabase
+    // 1. Identificar trabajador registrado y activo
     const { data: trabajadores } = await supabase
       .from('trabajadores')
       .select('*, proyectos(nombre)')
@@ -43,37 +43,37 @@ export async function POST(req: Request) {
     if (!trabajador) {
       await enviarWhatsApp(
         from,
-        '⚠️ Este número no se encuentra registrado como personal operativo activo en JHF Perforaciones.'
+        '⚠️ Este número no se encuentra registrado como personal activo en JHF Perforaciones.'
       )
       return NextResponse.json({ status: 'unregistered_user' })
     }
 
-    // 2. Control de formato: rechazo de audio y notas de voz
+    // 2. Control de formato: rechazo de notas de voz
     if (message.type === 'audio' || message.type === 'voice') {
       await enviarWhatsApp(
         from,
-        '👋 Hola, este sistema automatizado solo procesa texto. Por favor redacta tu reporte por escrito para registrarlo en el sistema.'
+        '👋 Hola, este sistema automatizado solo procesa texto. Por favor redacta tu reporte por escrito.'
       )
       return NextResponse.json({ status: 'audio_rejected' })
     }
 
-    // 3. Recepción de fotografía de soporte
+    // 3. Recepción de fotografía de evidencia
     if (message.type === 'image') {
       await enviarWhatsApp(
         from,
-        '📷 Foto de evidencia recibida con éxito. Recuerda enviar el texto con las cotas y avances si aún no lo has hecho.'
+        '📷 Foto de evidencia recibida con éxito. Recuerda redactar el texto con las cotas si aún no lo has enviado.'
       )
       return NextResponse.json({ status: 'image_received' })
     }
 
-    // 4. Procesamiento de mensajes de texto
+    // 4. Procesamiento de texto
     if (message.type === 'text') {
       const textoCrudo = message.text?.body?.trim() || ''
       const textoLower = textoCrudo.toLowerCase()
       const estadoActual = trabajador.estado_conversacion || 'inactivo'
       const borrador = trabajador.borrador_reporte || {}
 
-      // --- CASO 0: Cancelación o reinicio inmediato ---
+      // A. Cancelación o anulación
       if (
         textoLower.includes('cancelar') ||
         textoLower.includes('anular') ||
@@ -88,20 +88,20 @@ export async function POST(req: Request) {
 
         await enviarWhatsApp(
           from,
-          '🔄 Reporte cancelado. Puedes escribir nuevamente el avance o la novedad de tu frente de trabajo.'
+          '🔄 Reporte cancelado. Puedes escribir nuevamente los datos de tu jornada.'
         )
         return NextResponse.json({ status: 'cancelled' })
       }
 
-      // --- CASO 1: Flujo guiado de VARADA / NOVEDAD (Paso 2: ¿Se solucionó o sigue varado?) ---
+      // B. Seguimiento a Varadas / Paradas de obra
       if (estadoActual === 'varada_preguntando_solucion') {
         const sigueParado = textoLower.includes('sigue') || textoLower.includes('no') || textoLower.includes('parado') || textoLower.includes('mañana')
-        const resolucion = sigueParado ? 'EQUIPO QUEDA PARALIZADO' : 'NOVEDAD SOLUCIONADA EN JORNADA'
+        const resolucion = sigueParado ? 'EQUIPO QUEDA PARALIZADO' : 'NOVEDAD SOLUCIONADA'
 
         const datosVarada = {
           tipo: 'standby',
-          resumen: `• *Estado:* STAND-BY / VARADA\n• *Motivo reportado:* ${borrador.motivo_varada || 'Inconveniente técnico'}\n• *Situación:* ${resolucion}\n• *Detalle:* ${textoCrudo}`,
-          observaciones: `${borrador.motivo_varada || ''} | Estado: ${resolucion} | Nota: ${textoCrudo}`
+          resumen: `• *Estado:* STAND-BY / VARADA\n• *Motivo:* ${borrador.motivo_varada || 'Inconveniente técnico'}\n• *Situación:* ${resolucion}\n• *Detalle:* ${textoCrudo}`,
+          observaciones: `${borrador.motivo_varada || ''} | ${resolucion} | Nota: ${textoCrudo}`
         }
 
         await supabase.from('trabajadores').update({
@@ -111,12 +111,12 @@ export async function POST(req: Request) {
 
         await enviarWhatsApp(
           from,
-          `📋 *Resumen de la novedad registrada:*\n\n${datosVarada.resumen}\n\n📷 *Adjunta foto de la falla o planilla si la tienes.*\n\n¿Es correcto el reporte? Responde *SÍ* para asentar en bitácora o escribe el ajuste.`
+          `📋 *Resumen de la novedad registrada:*\n\n${datosVarada.resumen}\n\n📷 *Adjunta foto si la tienes.*\n\n¿Es correcto el reporte? Responde *SÍ* para asentar en bitácora.`
         )
         return NextResponse.json({ status: 'varada_ready' })
       }
 
-      // --- CASO 2: Confirmación final del reporte ---
+      // C. Confirmación definitiva del reporte
       if (['si', 'sí', 'correcto', 'ok', 'de acuerdo', 'confirmo', 'listo', 'guardar'].includes(textoLower)) {
         if (trabajador.borrador_reporte) {
           const b = trabajador.borrador_reporte
@@ -151,9 +151,8 @@ export async function POST(req: Request) {
         }
       }
 
-      // --- CASO 3: Detección de inicio de Varada / Problema en obra ---
-      const esVarada = detectarVaradaOProblema(textoLower)
-      if (esVarada) {
+      // D. Detección de novedad o falla mecánica
+      if (detectarVarada(textoLower)) {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'varada_preguntando_solucion',
           borrador_reporte: { motivo_varada: textoCrudo }
@@ -161,12 +160,12 @@ export async function POST(req: Request) {
 
         await enviarWhatsApp(
           from,
-          `⚠️ *Novedad registrada:* "${textoCrudo}"\n\n¿El problema se logró solucionar hoy o el equipo queda *PARADO* para mañana? ¿Qué repuesto, suministro o gestión se está esperando?`
+          `⚠️ *Novedad registrada:* "${textoCrudo}"\n\n¿El problema se logró solucionar hoy o el equipo queda *PARADO* para mañana? ¿Qué repuesto o gestión se está esperando?`
         )
         return NextResponse.json({ status: 'varada_followup' })
       }
 
-      // --- CASO 4: Procesamiento de Avance Técnico (Pilotaje o Suelos) ---
+      // E. Procesamiento técnico de avance (Pilotaje o Suelos)
       const previo = estadoActual === 'esperando_confirmacion' ? borrador : null
       const nuevoBorrador = interpretarAvanceObra(textoCrudo, previo)
 
@@ -179,7 +178,7 @@ export async function POST(req: Request) {
         from,
         `📋 *Resumen de tu reporte:* \n\n${nuevoBorrador.resumen}\n\n` +
         `----------------------------\n` +
-        `📷 *Recuerda enviar la foto de la planilla de campo o testigo.*\n\n` +
+        `📷 *Recuerda enviar la foto de la planilla o testigo.*\n\n` +
         `¿Los datos son correctos? Responde *SÍ* para asentar o escribe el dato a corregir (ej: *ensanche 2m* o *pilote P-04*).`
       )
       return NextResponse.json({ status: 'draft_created' })
@@ -192,33 +191,23 @@ export async function POST(req: Request) {
   }
 }
 
-// Normalizador fonético y corrector ortográfico de términos de perforación
-function normalizarLenguajeCampo(txt: string): string {
+// 1. Limpieza léxica y normalización fonética
+function normalizarTexto(txt: string): string {
   let s = txt.toLowerCase()
 
-  // Corregir comas decimales (ej: 2,5 -> 2.5)
+  // Comas a puntos
   s = s.replace(/(\d+),(\d+)/g, '$1.$2')
 
-  // Errores de ortografía comunes
-  s = s.replace(/\b(isimos|icimos|hizimos|hicimls|hicmos)\b/g, 'hicimos')
+  // Ortografía coloquial
+  s = s.replace(/\b(icimos|isimos|hizimos|hicimls|hicmos)\b/g, 'hicimos')
   s = s.replace(/\b(abansamos|avansamos|avanzamls)\b/g, 'avanzamos')
-  s = s.replace(/\b(preueco|pre ueco|pre-hueco|pre hueco)\b/g, 'pq')
-  s = s.replace(/\b(preperforasion|preperforacion|preperforar)\b/g, 'pq')
-  s = s.replace(/\b(ensanxe|ensanchado|escariado|escariador)\b/g, 'ensanche')
+  s = s.replace(/\b(preueco|pre ueco|pre-hueco|pre hueco|preperforacion|preperforasion)\b/g, 'pq')
+  s = s.replace(/\b(ensanxe|ensanchado|ensanchamos|escariado|escariador)\b/g, 'ensanche')
   s = s.replace(/\b(encamizado|camisa|camisas|tuberia)\b/g, 'encamisado')
 
-  // Fracciones habladas a decimales
-  s = s.replace(/\b(?:un|uno)?\s*metro\s+y\s+medio\b/g, '1.5 metros')
-  s = s.replace(/\bmedio\s+metro\b/g, '0.5 metros')
-  s = s.replace(/\bdos\s+metros?\s+y\s+medio\b/g, '2.5 metros')
-  s = s.replace(/\btres\s+metros?\s+y\s+medio\b/g, '3.5 metros')
-  s = s.replace(/\bcuatro\s+metros?\s+y\s+medio\b/g, '4.5 metros')
-  s = s.replace(/\bcinco\s+metros?\s+y\s+medio\b/g, '5.5 metros')
-  s = s.replace(/\bmetro\s+y\s+cuarto\b/g, '1.25 metros')
-
-  // Números en letras a dígitos
+  // Conversión de palabras numéricas a dígitos
   const numerosTexto: Record<string, string> = {
-    'cero': '0', 'un': '1', 'uno': '1', 'dos': '2', 'tres': '3',
+    'cero': '0', 'un': '1', 'uno': '1', 'una': '1', 'dos': '2', 'tres': '3',
     'cuatro': '4', 'cinco': '5', 'seis': '6', 'siete': '7', 'ocho': '8',
     'nueve': '9', 'diez': '10', 'once': '11', 'doce': '12', 'quince': '15', 'veinte': '20'
   }
@@ -226,29 +215,41 @@ function normalizarLenguajeCampo(txt: string): string {
     s = s.replace(new RegExp(`\\b${palabra}\\b`, 'g'), digito)
   }
 
+  // Fracciones y decimales hablados (tanto para dígitos como para palabras)
+  // Ej: "2 metros y medio", "2 y medio", "2m y medio" -> 2.5 metros
+  s = s.replace(/(\d+)\s*(?:m|mts|metros)?\s*(?:y\s*medio|con\s*medio|y\s*media)\b/g, (_, n) => `${parseFloat(n) + 0.5} metros`)
+  
+  // Ej: "metro y medio", "1 metro y medio" -> 1.5 metros
+  s = s.replace(/\b(?:1\s*)?(?:m|mts|metros)?\s*(?:y\s*medio|con\s*medio|y\s*media)\b/g, '1.5 metros')
+  
+  // Ej: "medio metro" -> 0.5 metros
+  s = s.replace(/\bmedio\s*(?:m|mts|metros?)\b/g, '0.5 metros')
+
+  // Ej: "2 con 5", "3 con 2" -> 2.5, 3.2
+  s = s.replace(/\b(\d+)\s*con\s*(\d+)\b/g, '$1.$2 metros')
+
   return s
 }
 
-// Detector de situaciones de detención operativa
-function detectarVaradaOProblema(tl: string): boolean {
-  const palabrasClave = [
+function detectarVarada(tl: string): boolean {
+  const palabras = [
     'varad', 'dano', 'daño', 'falla', 'revento', 'rompio', 'manguera',
     'lluvia', 'llubia', 'llovi', 'inund', 'torno', 'soldad', 'sin acpm',
     'sin combustible', 'sin agua', 'no llego concreto', 'esperando mixer',
     'no llego hierro', 'paro interventoria', 'paraliz', 'stand by', 'standby'
   ]
-  return palabrasClave.some(p => tl.includes(p)) && !tl.includes('hicimos') && !tl.includes('avanzamos')
+  return palabras.some(p => tl.includes(p)) && !tl.includes('hicimos') && !tl.includes('avanzamos')
 }
 
-// Analizador técnico cuantitativo (Pilotaje vs Suelos)
+// 2. Extracción técnica robusta
 function interpretarAvanceObra(textoOriginal: string, previo: any = null) {
-  const t = normalizarLenguajeCampo(textoOriginal)
+  const t = normalizarTexto(textoOriginal)
 
-  // 1. Caso Geotecnia / Estudio de suelos
+  // Caso: Estudio de suelos (SPT, NQ, Sondeos)
   if (t.includes('spt') || t.includes('sondeo') || t.includes('shelby') || t.includes('nq')) {
     const sondeoMatch = t.match(/s(?:ondeo)?[\s-]*(\d+)/i)
     const sptMatch = t.match(/(\d+)\s*(?:spt|ensayos?|golpes?)/i)
-    const cotaMatch = t.match(/(\d+[.]?\d*)\s*(?:m|mts|metros)/i)
+    const cotaMatch = t.match(/(\d+(?:\.\d+)?)\s*(?:m|mts|metros)?/i)
 
     const sondeoFinal = sondeoMatch ? `S-${sondeoMatch[1].padStart(2, '0')}` : (previo?.sondeo || 'S-01')
     const sptFinal = sptMatch ? parseInt(sptMatch[1]) : (previo?.ensayos_spt || 1)
@@ -264,25 +265,25 @@ function interpretarAvanceObra(textoOriginal: string, previo: any = null) {
     }
   }
 
-  // 2. Caso Pilotaje (PQ, Ensanche, Encamisado)
-  const piloteMatch = t.match(/(?:pilote|p)[\s-]*(\d+)/i) || t.match(/\ben el\s+(\d+)\b/i)
+  // Caso: Pilotaje (Pilote, Preperforación PQ, Ensanche, Encamisado)
+  const piloteMatch = t.match(/(?:pilote|p)[\s-]*(\d+)/i) || t.match(/\b(?:en el|al|el)\s+(\d+)\b/i)
 
-  // Preperforación PQ (ej: "3 metros en pq", "pq 3m", "3m prehueco")
+  // PQ: busca número antes de 'pq' O después de 'pq'
   const pqMatch =
-    t.match(/(\d+[.]?\d*)\s*(?:m|mts|metros)?\s*(?:en\s*pq|de\s*pq|\s*pq)/i) ||
-    t.match(/(?:pq|preperforacion)\s*[:=]?\s*(\d+[.]?\d*)/i)
+    t.match(/(\d+(?:\.\d+)?)\s*(?:m|mts|metros)?\s*(?:en|de)?\s*pq\b/i) ||
+    t.match(/\bpq\b\s*(?:de|en|fue|fueron)?\s*[:=]?\s*(\d+(?:\.\d+)?)/i)
 
-  // Ensanche (ej: "1.5m ensanche", "ensanche 2m", "1 metro de ensanxe")
+  // Ensanche: busca número antes de 'ensanche' O después de 'ensanche'
   const ensancheMatch =
-    t.match(/(\d+[.]?\d*)\s*(?:m|mts|metros)?\s*(?:de\s*)?ensanche/i) ||
-    t.match(/ensanche\s*[:=]?\s*(\d+[.]?\d*)/i)
+    t.match(/(\d+(?:\.\d+)?)\s*(?:m|mts|metros)?\s*(?:de|en)?\s*ensanche\b/i) ||
+    t.match(/\bensanche\b\s*(?:de|en|fue|fueron)?\s*[:=]?\s*(\d+(?:\.\d+)?)/i)
 
-  // Encamisado (ej: "2 metros de encamisado", "camisa 2m")
+  // Encamisado: busca número antes de 'encamisado' O después de 'encamisado'
   const encamisadoMatch =
-    t.match(/(\d+[.]?\d*)\s*(?:m|mts|metros)?\s*(?:de\s*)?encamisado/i) ||
-    t.match(/encamisado\s*[:=]?\s*(\d+[.]?\d*)/i)
+    t.match(/(\d+(?:\.\d+)?)\s*(?:m|mts|metros)?\s*(?:de|en)?\s*encamisado\b/i) ||
+    t.match(/\bencamisado\b\s*(?:de|en|fue|fueron)?\s*[:=]?\s*(\d+(?:\.\d+)?)/i)
 
-  // Fusión con datos previos si el operario corrige solo un campo
+  // Consolidación y memoria de corrección
   const piloteFinal = piloteMatch ? `P-${piloteMatch[1].padStart(2, '0')}` : (previo?.pilote || 'P-01')
   const pqFinal = pqMatch ? parseFloat(pqMatch[1]) : (previo?.avance_pq ?? 0)
   const ensancheFinal = ensancheMatch ? parseFloat(ensancheMatch[1]) : (previo?.ensanche ?? 0)
