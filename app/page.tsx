@@ -42,7 +42,7 @@ interface ReporteOperativo {
 }
 
 export default function Home() {
-  const [tab, setTab] = useState<'monitor' | 'bitacora' | 'configuracion'>('monitor')
+  const [tab, setTab] = useState<'monitor' | 'bitacora' | 'configuracion'>('configuracion')
   const [proyectos, setProyectos] = useState<Proyecto[]>([])
   const [trabajadores, setTrabajadores] = useState<Trabajador[]>([])
   const [reportes, setReportes] = useState<ReporteOperativo[]>([])
@@ -66,15 +66,19 @@ export default function Home() {
 
   async function cargarDatos() {
     try {
-      const { data: proys } = await supabase.from('proyectos').select('*').order('created_at', { ascending: false })
-      const { data: trabs } = await supabase.from('trabajadores').select('*, proyectos(*)').order('nombre', { ascending: true })
-      const { data: reps } = await supabase.from('reportes_operativos').select('*').order('created_at', { ascending: false })
+      const { data: proys, error: errP } = await supabase.from('proyectos').select('*').order('created_at', { ascending: false })
+      const { data: trabs, error: errT } = await supabase.from('trabajadores').select('*, proyectos(*)').order('nombre', { ascending: true })
+      const { data: reps, error: errR } = await supabase.from('reportes_operativos').select('*').order('created_at', { ascending: false })
+
+      if (errP) console.error('Error proyectos:', errP)
+      if (errT) console.error('Error trabajadores:', errT)
+      if (errR) console.error('Error reportes:', errR)
 
       if (proys) setProyectos(proys)
       if (trabs) setTrabajadores(trabs)
       if (reps) setReportes(reps)
     } catch (err) {
-      console.error('Error cargando datos:', err)
+      console.error('Error general:', err)
     }
   }
 
@@ -88,7 +92,56 @@ export default function Home() {
     cargarDatos()
   }
 
-  // Disparador manual para verificar envíos en tiempo real
+  async function crearProyecto(e: React.FormEvent) {
+    e.preventDefault()
+    if (!nombreProyecto.trim()) return
+
+    const { data, error } = await supabase.from('proyectos').insert({
+      nombre: nombreProyecto.trim(),
+      ubicacion: ubicacionProyecto.trim() || 'General'
+    }).select()
+
+    if (error) {
+      alert(`❌ Error al guardar la obra: ${error.message}`)
+      return
+    }
+
+    alert('✅ ¡Obra guardada exitosamente!')
+    setNombreProyecto('')
+    setUbicacionProyecto('')
+    await cargarDatos()
+  }
+
+  async function crearTrabajador(e: React.FormEvent) {
+    e.preventDefault()
+    if (!nombre.trim() || !telefono.trim() || !proyectoId) {
+      alert('⚠️ Por favor completa todos los campos requeridos.')
+      return
+    }
+
+    const telLimpio = telefono.replace(/\D/g, '')
+
+    const { data, error } = await supabase.from('trabajadores').insert({
+      nombre: nombre.trim(),
+      telefono: telLimpio,
+      proyecto_id: proyectoId,
+      cargo,
+      jornada,
+      activo: true,
+      estado_conversacion: 'inactivo'
+    }).select()
+
+    if (error) {
+      alert(`❌ Error al registrar trabajador: ${error.message}`)
+      return
+    }
+
+    alert('✅ ¡Operador registrado exitosamente!')
+    setNombre('')
+    setTelefono('')
+    await cargarDatos()
+  }
+
   async function dispararRondaAhora() {
     setEjecutando(true)
     setMensajeEstado('Enviando mensajes de WhatsApp a los operarios activos...')
@@ -109,7 +162,6 @@ export default function Home() {
     }
   }
 
-  // Disparador manual para enviar el consolidado ejecutivo
   async function dispararConsolidadoAhora() {
     setEjecutando(true)
     setMensajeEstado('Enviando consolidado a Don Jaime y Miguel...')
@@ -123,40 +175,6 @@ export default function Home() {
       setEjecutando(false)
       setTimeout(() => setMensajeEstado(''), 6000)
     }
-  }
-
-  async function crearTrabajador(e: React.FormEvent) {
-    e.preventDefault()
-    if (!nombre || !telefono || !proyectoId) return
-    const telLimpio = telefono.replace(/\D/g, '')
-
-    await supabase.from('trabajadores').insert({
-      nombre,
-      telefono: telLimpio,
-      proyecto_id: proyectoId,
-      cargo,
-      jornada,
-      activo: true,
-      estado_conversacion: 'inactivo'
-    })
-
-    setNombre('')
-    setTelefono('')
-    cargarDatos()
-  }
-
-  async function crearProyecto(e: React.FormEvent) {
-    e.preventDefault()
-    if (!nombreProyecto) return
-
-    await supabase.from('proyectos').insert({
-      nombre: nombreProyecto,
-      ubicacion: ubicacionProyecto || 'General'
-    })
-
-    setNombreProyecto('')
-    setUbicacionProyecto('')
-    cargarDatos()
   }
 
   return (
@@ -189,7 +207,7 @@ export default function Home() {
             onClick={() => setTab('configuracion')}
             className={`px-3 py-1.5 rounded-md transition ${tab === 'configuracion' ? 'bg-sky-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
           >
-            ⚙️ Personal y Obras
+            ⚙️ Personal y Obras ({proyectos.length} Obras)
           </button>
         </div>
       </header>
@@ -201,6 +219,7 @@ export default function Home() {
           </div>
         )}
 
+        {/* MONITOR */}
         {tab === 'monitor' && (
           <div className="space-y-6">
             <div className="flex flex-wrap justify-between items-center gap-3">
@@ -308,6 +327,7 @@ export default function Home() {
           </div>
         )}
 
+        {/* BITACORA */}
         {tab === 'bitacora' && (
           <div className="space-y-4">
             <div className="flex justify-between items-center">
@@ -374,15 +394,67 @@ export default function Home() {
           </div>
         )}
 
+        {/* CONFIGURACIÓN */}
         {tab === 'configuracion' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* 1. CREAR OBRA PRIMERO */}
             <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
-              <h3 className="text-sm font-semibold text-white mb-1">Registrar Operador en WhatsApp</h3>
-              <p className="text-xs text-slate-400 mb-4">El bot solo responderá a números autorizados en esta lista.</p>
+              <h3 className="text-sm font-semibold text-white mb-1">1. Crear Frente de Trabajo / Proyecto</h3>
+              <p className="text-xs text-slate-400 mb-4">Crea primero la obra para poder asignarla al personal.</p>
+
+              <form onSubmit={crearProyecto} className="space-y-3 text-xs">
+                <div>
+                  <label className="block text-slate-400 mb-1">Nombre del Proyecto / Obra *</label>
+                  <input
+                    type="text"
+                    required
+                    value={nombreProyecto}
+                    onChange={e => setNombreProyecto(e.target.value)}
+                    placeholder="Ej: Pilotaje Autopista Norte / Ubaque"
+                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Ubicación / Tramo</label>
+                  <input
+                    type="text"
+                    value={ubicacionProyecto}
+                    onChange={e => setUbicacionProyecto(e.target.value)}
+                    placeholder="Ej: Bogotá D.C. / K16+000"
+                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2 rounded transition mt-2 shadow"
+                >
+                  ➕ Guardar Proyecto / Obra
+                </button>
+              </form>
+
+              {/* Lista de obras creadas */}
+              <div className="mt-4 pt-3 border-t border-slate-800">
+                <span className="text-[11px] text-slate-400 font-medium">Obras activas creadas ({proyectos.length}):</span>
+                <div className="mt-2 space-y-1.5 max-h-36 overflow-y-auto">
+                  {proyectos.map(p => (
+                    <div key={p.id} className="text-[11px] p-2 bg-slate-950 rounded border border-slate-800 flex justify-between">
+                      <span className="font-semibold text-sky-400">{p.nombre}</span>
+                      <span className="text-slate-500">{p.ubicacion}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* 2. REGISTRAR OPERADOR */}
+            <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
+              <h3 className="text-sm font-semibold text-white mb-1">2. Registrar Operador en WhatsApp</h3>
+              <p className="text-xs text-slate-400 mb-4">Asocia al trabajador con su obra asignada.</p>
 
               <form onSubmit={crearTrabajador} className="space-y-3 text-xs">
                 <div>
-                  <label className="block text-slate-400 mb-1">Nombre Completo</label>
+                  <label className="block text-slate-400 mb-1">Nombre Completo *</label>
                   <input
                     type="text"
                     required
@@ -395,7 +467,7 @@ export default function Home() {
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-slate-400 mb-1">Teléfono</label>
+                    <label className="block text-slate-400 mb-1">Teléfono WhatsApp *</label>
                     <input
                       type="text"
                       required
@@ -421,7 +493,7 @@ export default function Home() {
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-slate-400 mb-1">Frente Asignado</label>
+                    <label className="block text-slate-400 mb-1">Frente Asignado *</label>
                     <select
                       required
                       value={proyectoId}
@@ -450,45 +522,9 @@ export default function Home() {
 
                 <button
                   type="submit"
-                  className="w-full bg-sky-600 hover:bg-sky-500 text-white font-medium py-2 rounded transition mt-2"
+                  className="w-full bg-sky-600 hover:bg-sky-500 text-white font-medium py-2 rounded transition mt-2 shadow"
                 >
-                  Registrar Personal
-                </button>
-              </form>
-            </div>
-
-            <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
-              <h3 className="text-sm font-semibold text-white mb-1">Crear Frente de Trabajo / Proyecto</h3>
-              <p className="text-xs text-slate-400 mb-4">Proyectos activos para asociación en bitácora.</p>
-
-              <form onSubmit={crearProyecto} className="space-y-3 text-xs">
-                <div>
-                  <label className="block text-slate-400 mb-1">Nombre del Proyecto</label>
-                  <input
-                    type="text"
-                    required
-                    value={nombreProyecto}
-                    onChange={e => setNombreProyecto(e.target.value)}
-                    placeholder="Ej: Pilotaje Autopista Norte / Ubaque"
-                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 mb-1">Ubicación / Tramo</label>
-                  <input
-                    type="text"
-                    value={ubicacionProyecto}
-                    onChange={e => setUbicacionProyecto(e.target.value)}
-                    placeholder="Ej: Bogotá D.C. / K16+000"
-                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  className="w-full bg-slate-800 hover:bg-slate-700 text-white font-medium py-2 rounded transition mt-2 border border-slate-700"
-                >
-                  Crear Proyecto
+                  ➕ Registrar Personal
                 </button>
               </form>
             </div>
