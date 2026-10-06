@@ -5,7 +5,6 @@ const META_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'clave_secreta_re
 const WHATSAPP_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || ''
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_ID || ''
 
-// 1. Verificación del Webhook de Meta (GET)
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
   const mode = searchParams.get('hub.mode')
@@ -18,7 +17,6 @@ export async function GET(req: Request) {
   return new Response('Token no coincide', { status: 403 })
 }
 
-// 2. Recepción de mensajes (POST)
 export async function POST(req: Request) {
   try {
     const body = await req.json()
@@ -27,25 +25,34 @@ export async function POST(req: Request) {
     const value = changes?.value
     const message = value?.messages?.[0]
 
-    if (!message) return NextResponse.json({ status: 'ignored' })
+    if (!message) return NextResponse.json({ status: 'ignored_no_message' })
 
-    const from = message.from // Número del trabajador (ej: 573103953485)
+    const from = message.from
     const msgType = message.type
+    console.log(`[MENSAJE ENTRANTE] De: ${from} | Tipo: ${msgType}`)
 
-    // Buscar si el trabajador está registrado y activo
-    const { data: trabajador } = await supabase
+    // 1. Buscar trabajador en Supabase
+    const { data: trabajador, error: dbError } = await supabase
       .from('trabajadores')
       .select('*, proyectos(nombre)')
       .eq('telefono', from)
       .eq('activo', true)
-      .single()
+      .maybeSingle()
 
-    if (!trabajador) {
-      // Ignorar mensajes de personas no registradas
-      return NextResponse.json({ status: 'ignored' })
+    if (dbError) {
+      console.error('[SUPABASE ERROR]:', dbError)
     }
 
-    // SI ENVÍA AUDIO O NOTA DE VOZ:
+    if (!trabajador) {
+      console.warn(`[AVISO] Número ${from} no registrado o inactivo en Supabase. Enviando advertencia...`)
+      await enviarWhatsApp(
+        from,
+        '⚠️ Hola, este número no se encuentra registrado como personal activo en el sistema de control operativo.'
+      )
+      return NextResponse.json({ status: 'unregistered_user' })
+    }
+
+    // 2. Si envía audio o nota de voz
     if (msgType === 'audio' || msgType === 'voice') {
       await enviarWhatsApp(
         from,
@@ -54,7 +61,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'audio_rejected' })
     }
 
-    // SI ENVÍA FOTO:
+    // 3. Si envía foto
     if (msgType === 'image') {
       await enviarWhatsApp(
         from,
@@ -63,12 +70,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'image_received' })
     }
 
-    // SI ENVÍA TEXTO:
+    // 4. Si envía texto
     if (msgType === 'text') {
       const texto = message.text?.body?.trim() || ''
       const textoLower = texto.toLowerCase()
 
-      // Si el trabajador responde confirmando el borrador previo
+      // Confirmación
       if (['si', 'sí', 'correcto', 'está bien', 'esta bien', 'ok', 'de acuerdo'].includes(textoLower)) {
         if (trabajador.borrador_reporte) {
           const b = trabajador.borrador_reporte
@@ -103,16 +110,14 @@ export async function POST(req: Request) {
         }
       }
 
-      // Procesamiento de texto del reporte
+      // Procesar nuevo borrador
       const interpretacion = interpretarReporteTexto(texto)
 
-      // Guardamos el borrador temporal en el perfil del trabajador
       await supabase.from('trabajadores').update({
         estado_conversacion: 'esperando_confirmacion',
         borrador_reporte: interpretacion
       }).eq('id', trabajador.id)
 
-      // Solicitar confirmación formal
       await enviarWhatsApp(
         from,
         `📋 Entendido. Resumen de tu reporte:\n\n${interpretacion.resumen}\n\n⚠️ Recuerda adjuntar la foto de evidencia si no la has enviado.\n\n¿Los datos son correctos? Responde *SÍ* para registrar o escribe el dato a corregir.`
@@ -127,19 +132,16 @@ export async function POST(req: Request) {
   }
 }
 
-// Analizador de patrones técnicos en texto
 function interpretarReporteTexto(t: string) {
   const tl = t.toLowerCase()
 
-  // 1. Detección de lluvias / Stand-by
   if (tl.includes('lluvia') || tl.includes('llovió') || tl.includes('stand by') || tl.includes('standby') || tl.includes('paralizado')) {
     return {
       tipo: 'standby',
-      resumen: `• Estado: STAND-BY / JORNADA SUSPENDIDA\n• Motivo: Clima adverso o lluvias reportadas\n• Detalle: "${t}"`
+      resumen: `• Estado: STAND-BY / JORNADA SUSPENDIDA\n• Motivo: Clima adverso o lluvias\n• Detalle: "${t}"`
     }
   }
 
-  // 2. Detección de taller, soldadura, motobomba o instalación
   if (tl.includes('sold') || tl.includes('motor') || tl.includes('torno') || tl.includes('agua') || tl.includes('instal')) {
     return {
       tipo: 'mantenimiento_instalacion',
@@ -147,7 +149,6 @@ function interpretarReporteTexto(t: string) {
     }
   }
 
-  // 3. Detección de sondeos y estudios de suelos (SPT, Shelby, NQ, HQ)
   if (tl.includes('spt') || tl.includes('nq') || tl.includes('shelby') || tl.includes('sondeo')) {
     const sondeoMatch = t.match(/s-?\s*(\d+)/i)
     const sptMatch = t.match(/(\d+)\s*(spt|ensayos?)/i)
@@ -162,7 +163,6 @@ function interpretarReporteTexto(t: string) {
     }
   }
 
-  // 4. Pilotes y cimentaciones (PQ, ensanche, encamisado)
   const piloteMatch = t.match(/p-?\s*(\d+)/i)
   const pqMatch = t.match(/(\d+[.,]?\d*)\s*(m|metros)?\s*(en\s*pq|pq)/i)
   const ensancheMatch = t.match(/(\d+[.,]?\d*)\s*(m|metros)?\s*(de\s*ensanche|ensanche|ensanch)/i)
@@ -178,14 +178,14 @@ function interpretarReporteTexto(t: string) {
   }
 }
 
-// Envío a la API oficial de Meta
 async function enviarWhatsApp(to: string, text: string) {
   if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
-    console.log(`[SIMULACIÓN WHATSAPP a +${to}]:\n${text}`)
+    console.error('[ERROR CRÍTICO] Faltan variables WHATSAPP_ACCESS_TOKEN o WHATSAPP_PHONE_ID en Vercel.')
     return
   }
 
-  await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
+  const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
@@ -199,4 +199,11 @@ async function enviarWhatsApp(to: string, text: string) {
       text: { body: text }
     })
   })
+
+  const resData = await res.json()
+  if (!res.ok) {
+    console.error(`[ERROR META GRAPH API al enviar a ${to}]:`, JSON.stringify(resData))
+  } else {
+    console.log(`[WHATSAPP ENVIADO EXITOSAMENTE a ${to}]:`, resData.messages?.[0]?.id)
+  }
 }
