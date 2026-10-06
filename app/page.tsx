@@ -60,19 +60,18 @@ export default function Home() {
   const [nombreProyecto, setNombreProyecto] = useState('')
   const [ubicacionProyecto, setUbicacionProyecto] = useState('')
 
+  // Estado de edición de trabajador
+  const [editandoTrabajador, setEditandoTrabajador] = useState<Trabajador | null>(null)
+
   useEffect(() => {
     cargarDatos()
   }, [])
 
   async function cargarDatos() {
     try {
-      const { data: proys, error: errP } = await supabase.from('proyectos').select('*').order('created_at', { ascending: false })
-      const { data: trabs, error: errT } = await supabase.from('trabajadores').select('*, proyectos(*)').order('nombre', { ascending: true })
-      const { data: reps, error: errR } = await supabase.from('reportes_operativos').select('*').order('created_at', { ascending: false })
-
-      if (errP) console.error('Error proyectos:', errP)
-      if (errT) console.error('Error trabajadores:', errT)
-      if (errR) console.error('Error reportes:', errR)
+      const { data: proys } = await supabase.from('proyectos').select('*').order('created_at', { ascending: false })
+      const { data: trabs } = await supabase.from('trabajadores').select('*, proyectos(*)').order('nombre', { ascending: true })
+      const { data: reps } = await supabase.from('reportes_operativos').select('*').order('created_at', { ascending: false })
 
       if (proys) setProyectos(proys)
       if (trabs) setTrabajadores(trabs)
@@ -96,10 +95,10 @@ export default function Home() {
     e.preventDefault()
     if (!nombreProyecto.trim()) return
 
-    const { data, error } = await supabase.from('proyectos').insert({
+    const { error } = await supabase.from('proyectos').insert({
       nombre: nombreProyecto.trim(),
       ubicacion: ubicacionProyecto.trim() || 'General'
-    }).select()
+    })
 
     if (error) {
       alert(`❌ Error al guardar la obra: ${error.message}`)
@@ -109,7 +108,7 @@ export default function Home() {
     alert('✅ ¡Obra guardada exitosamente!')
     setNombreProyecto('')
     setUbicacionProyecto('')
-    await cargarDatos()
+    cargarDatos()
   }
 
   async function crearTrabajador(e: React.FormEvent) {
@@ -121,7 +120,7 @@ export default function Home() {
 
     const telLimpio = telefono.replace(/\D/g, '')
 
-    const { data, error } = await supabase.from('trabajadores').insert({
+    const { error } = await supabase.from('trabajadores').insert({
       nombre: nombre.trim(),
       telefono: telLimpio,
       proyecto_id: proyectoId,
@@ -129,7 +128,7 @@ export default function Home() {
       jornada,
       activo: true,
       estado_conversacion: 'inactivo'
-    }).select()
+    })
 
     if (error) {
       alert(`❌ Error al registrar trabajador: ${error.message}`)
@@ -139,7 +138,45 @@ export default function Home() {
     alert('✅ ¡Operador registrado exitosamente!')
     setNombre('')
     setTelefono('')
-    await cargarDatos()
+    cargarDatos()
+  }
+
+  async function guardarEdicionTrabajador(e: React.FormEvent) {
+    e.preventDefault()
+    if (!editandoTrabajador) return
+
+    const { error } = await supabase
+      .from('trabajadores')
+      .update({
+        nombre: editandoTrabajador.nombre,
+        telefono: editandoTrabajador.telefono.replace(/\D/g, ''),
+        proyecto_id: editandoTrabajador.proyecto_id,
+        cargo: editandoTrabajador.cargo,
+        jornada: editandoTrabajador.jornada
+      })
+      .eq('id', editandoTrabajador.id)
+
+    if (error) {
+      alert(`❌ Error al actualizar: ${error.message}`)
+      return
+    }
+
+    alert('✅ Operador actualizado correctamente.')
+    setEditandoTrabajador(null)
+    cargarDatos()
+  }
+
+  async function eliminarTrabajador(id: string, nombreTrabajador: string) {
+    if (!confirm(`¿Estás seguro de que deseas eliminar a ${nombreTrabajador}?`)) return
+
+    const { error } = await supabase.from('trabajadores').delete().eq('id', id)
+    if (error) {
+      alert(`❌ No se pudo eliminar: ${error.message}`)
+      return
+    }
+
+    alert('🗑️ Operador eliminado.')
+    cargarDatos()
   }
 
   async function dispararRondaAhora() {
@@ -207,7 +244,7 @@ export default function Home() {
             onClick={() => setTab('configuracion')}
             className={`px-3 py-1.5 rounded-md transition ${tab === 'configuracion' ? 'bg-sky-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
           >
-            ⚙️ Personal y Obras ({proyectos.length} Obras)
+            ⚙️ Personal y Obras ({trabajadores.length})
           </button>
         </div>
       </header>
@@ -216,6 +253,98 @@ export default function Home() {
         {mensajeEstado && (
           <div className="mb-4 p-3 bg-sky-950/80 border border-sky-600 text-sky-200 text-xs rounded-lg flex items-center justify-between">
             <span>{mensajeEstado}</span>
+          </div>
+        )}
+
+        {/* MODAL DE EDICIÓN DE TRABAJADOR */}
+        {editandoTrabajador && (
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 max-w-md w-full text-xs shadow-2xl">
+              <h3 className="text-sm font-bold text-white mb-1">Editar Operador</h3>
+              <p className="text-slate-400 mb-4">Modifica el frente asignado, cargo o teléfono.</p>
+
+              <form onSubmit={guardarEdicionTrabajador} className="space-y-3">
+                <div>
+                  <label className="block text-slate-400 mb-1">Nombre</label>
+                  <input
+                    type="text"
+                    required
+                    value={editandoTrabajador.nombre}
+                    onChange={e => setEditandoTrabajador({ ...editandoTrabajador, nombre: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-400 mb-1">Teléfono</label>
+                    <input
+                      type="text"
+                      required
+                      value={editandoTrabajador.telefono}
+                      onChange={e => setEditandoTrabajador({ ...editandoTrabajador, telefono: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">Cargo</label>
+                    <select
+                      value={editandoTrabajador.cargo}
+                      onChange={e => setEditandoTrabajador({ ...editandoTrabajador, cargo: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                    >
+                      <option value="Perforador">Perforador</option>
+                      <option value="Auxiliar">Auxiliar</option>
+                      <option value="Residente">Residente</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-400 mb-1">Cambiar Frente de Obra</label>
+                    <select
+                      required
+                      value={editandoTrabajador.proyecto_id}
+                      onChange={e => setEditandoTrabajador({ ...editandoTrabajador, proyecto_id: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                    >
+                      {proyectos.map(p => (
+                        <option key={p.id} value={p.id}>{p.nombre}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">Jornada</label>
+                    <select
+                      value={editandoTrabajador.jornada}
+                      onChange={e => setEditandoTrabajador({ ...editandoTrabajador, jornada: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                    >
+                      <option value="L-S">Lunes a Sábado</option>
+                      <option value="L-V">Lunes a Viernes</option>
+                      <option value="Todos">Domingos incluidos</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="flex gap-2 pt-2">
+                  <button
+                    type="submit"
+                    className="flex-1 bg-sky-600 hover:bg-sky-500 text-white font-medium py-2 rounded transition"
+                  >
+                    Guardar Cambios
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditandoTrabajador(null)}
+                    className="px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 py-2 rounded transition"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
         )}
 
@@ -309,16 +438,24 @@ export default function Home() {
 
                     <div className="mt-4 pt-3 border-t border-slate-800/80 flex justify-between items-center text-xs">
                       <span className="text-[11px] text-slate-500">Jornada: {t.jornada}</span>
-                      <button
-                        onClick={() => toggleActivoTrabajador(t.id, t.activo)}
-                        className={`text-[11px] px-2.5 py-1 rounded transition font-medium ${
-                          t.activo
-                            ? 'bg-red-950/40 hover:bg-red-900/50 text-red-300 border border-red-800/50'
-                            : 'bg-emerald-950/40 hover:bg-emerald-900/50 text-emerald-300 border border-emerald-800/50'
-                        }`}
-                      >
-                        {t.activo ? 'Pausar hoy' : 'Activar'}
-                      </button>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setEditandoTrabajador(t)}
+                          className="text-[11px] text-sky-400 hover:text-sky-300 underline"
+                        >
+                          Editar
+                        </button>
+                        <button
+                          onClick={() => toggleActivoTrabajador(t.id, t.activo)}
+                          className={`text-[11px] px-2.5 py-1 rounded transition font-medium ${
+                            t.activo
+                              ? 'bg-red-950/40 hover:bg-red-900/50 text-red-300 border border-red-800/50'
+                              : 'bg-emerald-950/40 hover:bg-emerald-900/50 text-emerald-300 border border-emerald-800/50'
+                          }`}
+                        >
+                          {t.activo ? 'Pausar hoy' : 'Activar'}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )
@@ -361,7 +498,7 @@ export default function Home() {
                       <th className="p-3">Observaciones / Detalle</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-800/50">
+                  <tbody className="divide-y border-slate-800/50">
                     {reportes.map(r => (
                       <tr key={r.id} className="hover:bg-slate-800/20 transition">
                         <td className="p-3 whitespace-nowrap text-slate-400">
@@ -396,137 +533,170 @@ export default function Home() {
 
         {/* CONFIGURACIÓN */}
         {tab === 'configuracion' && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* 1. CREAR OBRA PRIMERO */}
-            <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
-              <h3 className="text-sm font-semibold text-white mb-1">1. Crear Frente de Trabajo / Proyecto</h3>
-              <p className="text-xs text-slate-400 mb-4">Crea primero la obra para poder asignarla al personal.</p>
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* CREAR OBRA */}
+              <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
+                <h3 className="text-sm font-semibold text-white mb-1">1. Crear Frente de Trabajo / Proyecto</h3>
+                <p className="text-xs text-slate-400 mb-4">Crea la obra para poder asignarla al personal.</p>
 
-              <form onSubmit={crearProyecto} className="space-y-3 text-xs">
-                <div>
-                  <label className="block text-slate-400 mb-1">Nombre del Proyecto / Obra *</label>
-                  <input
-                    type="text"
-                    required
-                    value={nombreProyecto}
-                    onChange={e => setNombreProyecto(e.target.value)}
-                    placeholder="Ej: Pilotaje Autopista Norte / Ubaque"
-                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 mb-1">Ubicación / Tramo</label>
-                  <input
-                    type="text"
-                    value={ubicacionProyecto}
-                    onChange={e => setUbicacionProyecto(e.target.value)}
-                    placeholder="Ej: Bogotá D.C. / K16+000"
-                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2 rounded transition mt-2 shadow"
-                >
-                  ➕ Guardar Proyecto / Obra
-                </button>
-              </form>
-
-              {/* Lista de obras creadas */}
-              <div className="mt-4 pt-3 border-t border-slate-800">
-                <span className="text-[11px] text-slate-400 font-medium">Obras activas creadas ({proyectos.length}):</span>
-                <div className="mt-2 space-y-1.5 max-h-36 overflow-y-auto">
-                  {proyectos.map(p => (
-                    <div key={p.id} className="text-[11px] p-2 bg-slate-950 rounded border border-slate-800 flex justify-between">
-                      <span className="font-semibold text-sky-400">{p.nombre}</span>
-                      <span className="text-slate-500">{p.ubicacion}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* 2. REGISTRAR OPERADOR */}
-            <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
-              <h3 className="text-sm font-semibold text-white mb-1">2. Registrar Operador en WhatsApp</h3>
-              <p className="text-xs text-slate-400 mb-4">Asocia al trabajador con su obra asignada.</p>
-
-              <form onSubmit={crearTrabajador} className="space-y-3 text-xs">
-                <div>
-                  <label className="block text-slate-400 mb-1">Nombre Completo *</label>
-                  <input
-                    type="text"
-                    required
-                    value={nombre}
-                    onChange={e => setNombre(e.target.value)}
-                    placeholder="Ej: Wilson Mocoa"
-                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
+                <form onSubmit={crearProyecto} className="space-y-3 text-xs">
                   <div>
-                    <label className="block text-slate-400 mb-1">Teléfono WhatsApp *</label>
+                    <label className="block text-slate-400 mb-1">Nombre del Proyecto / Obra *</label>
                     <input
                       type="text"
                       required
-                      value={telefono}
-                      onChange={e => setTelefono(e.target.value)}
-                      placeholder="Ej: 3209511767"
+                      value={nombreProyecto}
+                      onChange={e => setNombreProyecto(e.target.value)}
+                      placeholder="Ej: Pilotaje Autopista Norte / Ubaque"
                       className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
                     />
                   </div>
                   <div>
-                    <label className="block text-slate-400 mb-1">Cargo</label>
-                    <select
-                      value={cargo}
-                      onChange={e => setCargo(e.target.value)}
+                    <label className="block text-slate-400 mb-1">Ubicación / Tramo</label>
+                    <input
+                      type="text"
+                      value={ubicacionProyecto}
+                      onChange={e => setUbicacionProyecto(e.target.value)}
+                      placeholder="Ej: Bogotá D.C. / K16+000"
                       className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                    >
-                      <option value="Perforador">Perforador</option>
-                      <option value="Auxiliar">Auxiliar</option>
-                      <option value="Residente">Residente</option>
-                    </select>
+                    />
                   </div>
-                </div>
 
-                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="submit"
+                    className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2 rounded transition mt-2 shadow"
+                  >
+                    ➕ Guardar Proyecto / Obra
+                  </button>
+                </form>
+              </div>
+
+              {/* REGISTRAR OPERADOR */}
+              <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
+                <h3 className="text-sm font-semibold text-white mb-1">2. Registrar Operador en WhatsApp</h3>
+                <p className="text-xs text-slate-400 mb-4">Asocia al trabajador con su obra asignada.</p>
+
+                <form onSubmit={crearTrabajador} className="space-y-3 text-xs">
                   <div>
-                    <label className="block text-slate-400 mb-1">Frente Asignado *</label>
-                    <select
+                    <label className="block text-slate-400 mb-1">Nombre Completo *</label>
+                    <input
+                      type="text"
                       required
-                      value={proyectoId}
-                      onChange={e => setProyectoId(e.target.value)}
+                      value={nombre}
+                      onChange={e => setNombre(e.target.value)}
+                      placeholder="Ej: Wilson Mocoa"
                       className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                    >
-                      <option value="">Selecciona obra...</option>
-                      {proyectos.map(p => (
-                        <option key={p.id} value={p.id}>{p.nombre}</option>
-                      ))}
-                    </select>
+                    />
                   </div>
-                  <div>
-                    <label className="block text-slate-400 mb-1">Jornada</label>
-                    <select
-                      value={jornada}
-                      onChange={e => setJornada(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                    >
-                      <option value="L-S">Lunes a Sábado</option>
-                      <option value="L-V">Lunes a Viernes</option>
-                      <option value="Todos">Domingos incluidos</option>
-                    </select>
-                  </div>
-                </div>
 
-                <button
-                  type="submit"
-                  className="w-full bg-sky-600 hover:bg-sky-500 text-white font-medium py-2 rounded transition mt-2 shadow"
-                >
-                  ➕ Registrar Personal
-                </button>
-              </form>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-slate-400 mb-1">Teléfono WhatsApp *</label>
+                      <input
+                        type="text"
+                        required
+                        value={telefono}
+                        onChange={e => setTelefono(e.target.value)}
+                        placeholder="Ej: 3209511767"
+                        className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-400 mb-1">Cargo</label>
+                      <select
+                        value={cargo}
+                        onChange={e => setCargo(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                      >
+                        <option value="Perforador">Perforador</option>
+                        <option value="Auxiliar">Auxiliar</option>
+                        <option value="Residente">Residente</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-slate-400 mb-1">Frente Asignado *</label>
+                      <select
+                        required
+                        value={proyectoId}
+                        onChange={e => setProyectoId(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                      >
+                        <option value="">Selecciona obra...</option>
+                        {proyectos.map(p => (
+                          <option key={p.id} value={p.id}>{p.nombre}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-slate-400 mb-1">Jornada</label>
+                      <select
+                        value={jornada}
+                        onChange={e => setJornada(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                      >
+                        <option value="L-S">Lunes a Sábado</option>
+                        <option value="L-V">Lunes a Viernes</option>
+                        <option value="Todos">Domingos incluidos</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full bg-sky-600 hover:bg-sky-500 text-white font-medium py-2 rounded transition mt-2 shadow"
+                  >
+                    ➕ Registrar Personal
+                  </button>
+                </form>
+              </div>
+            </div>
+
+            {/* LISTA COMPLETA DE OPERARIOS REGISTRADOS */}
+            <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
+              <h3 className="text-sm font-semibold text-white mb-3">Personal Registrado en Sistema ({trabajadores.length})</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-950 border-b border-slate-800 text-slate-400">
+                    <tr>
+                      <th className="p-2.5">Nombre</th>
+                      <th className="p-2.5">Teléfono</th>
+                      <th className="p-2.5">Cargo</th>
+                      <th className="p-2.5">Frente de Obra</th>
+                      <th className="p-2.5">Jornada</th>
+                      <th className="p-2.5 text-right">Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/40">
+                    {trabajadores.map(t => (
+                      <tr key={t.id} className="hover:bg-slate-800/20">
+                        <td className="p-2.5 font-medium text-white">{t.nombre}</td>
+                        <td className="p-2.5 text-slate-300">+{t.telefono}</td>
+                        <td className="p-2.5 text-slate-400">{t.cargo}</td>
+                        <td className="p-2.5 font-semibold text-sky-400">{t.proyectos?.nombre || 'General'}</td>
+                        <td className="p-2.5 text-slate-400">{t.jornada}</td>
+                        <td className="p-2.5 text-right space-x-2">
+                          <button
+                            onClick={() => setEditandoTrabajador(t)}
+                            className="text-sky-400 hover:text-sky-300 font-medium px-2 py-1 rounded bg-sky-950/50 border border-sky-800/50"
+                          >
+                            ✏️ Editar
+                          </button>
+                          <button
+                            onClick={() => eliminarTrabajador(t.id, t.nombre)}
+                            className="text-red-400 hover:text-red-300 font-medium px-2 py-1 rounded bg-red-950/50 border border-red-800/50"
+                          >
+                            🗑️ Borrar
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         )}
