@@ -1,408 +1,313 @@
 'use client'
 
-export const dynamic = 'force-dynamic'
-
-import { useEffect, useState } from 'react'
+import { useState, useEffect } from 'react'
 import { supabase } from '@/lib/supabase'
+
+export const dynamic = 'force-dynamic'
 
 interface Proyecto {
   id: string
   nombre: string
-  fecha_inicio: string
-  fecha_fin: string | null
-  activo: boolean
+  ubicacion: string
 }
 
 interface Trabajador {
   id: string
   nombre: string
   telefono: string
-  proyecto_id: string | null
-  jornada: 'L-V' | 'L-S'
+  proyecto_id: string
+  cargo: string
   activo: boolean
-  proyectos?: { nombre: string }
+  jornada: string
+  proyectos?: Proyecto
 }
 
-interface Reporte {
+interface ReporteOperativo {
   id: string
   created_at: string
+  trabajador_id: string
   trabajador_nombre: string
   proyecto_nombre: string
-  pilote: string
+  tipo_operacion: string
+  pilote?: string
+  sondeo?: string
   avance_pq: number
   ensanche: number
   encamisado: number
+  metros_nq: number
+  ensayos_spt: number
   observaciones: string
   confirmado: boolean
 }
 
-export default function ConsolaAdmin() {
-  const [tab, setTab] = useState<'config' | 'reportes'>('config')
+export default function Home() {
+  const [tab, setTab] = useState<'monitor' | 'bitacora' | 'configuracion'>('monitor')
   const [proyectos, setProyectos] = useState<Proyecto[]>([])
   const [trabajadores, setTrabajadores] = useState<Trabajador[]>([])
-  const [reportes, setReportes] = useState<Reporte[]>([])
-  
-  // Form proyecto
-  const [editingProyectoId, setEditingProyectoId] = useState<string | null>(null)
-  const [nombreProyecto, setNombreProyecto] = useState('')
-  const [fechaInicio, setFechaInicio] = useState(new Date().toISOString().split('T')[0])
-  const [fechaFin, setFechaFin] = useState('')
+  const [reportes, setReportes] = useState<ReporteOperativo[]>([])
+  const [cargando, setCargando] = useState(true)
 
-  // Form trabajador
-  const [editingTrabajadorId, setEditingTrabajadorId] = useState<string | null>(null)
-  const [nombreTrabajador, setNombreTrabajador] = useState('')
-  const [telefonoTrabajador, setTelefonoTrabajador] = useState('')
-  const [proyectoSeleccionado, setProyectoSeleccionado] = useState('')
-  const [jornadaTrabajador, setJornadaTrabajador] = useState<'L-V' | 'L-S'>('L-V')
+  // Formulario nuevo trabajador
+  const [nombre, setNombre] = useState('')
+  const [telefono, setTelefono] = useState('')
+  const [proyectoId, setProyectoId] = useState('')
+  const [jornada, setJornada] = useState('L-S')
+  const [cargo, setCargo] = useState('Perforador')
+
+  // Formulario nuevo proyecto
+  const [nombreProyecto, setNombreProyecto] = useState('')
+  const [ubicacionProyecto, setUbicacionProyecto] = useState('')
 
   useEffect(() => {
     cargarDatos()
   }, [])
 
   async function cargarDatos() {
-    const { data: proys } = await supabase.from('proyectos').select('*').order('created_at', { ascending: false })
-    const { data: trabs } = await supabase.from('trabajadores').select('*, proyectos(nombre)').order('created_at', { ascending: false })
-    const { data: reps } = await supabase.from('reportes_operativos').select('*').order('created_at', { ascending: false })
+    setCargando(true)
+    try {
+      const { data: proys } = await supabase.from('proyectos').select('*').order('created_at', { ascending: false })
+      const { data: trabs } = await supabase.from('trabajadores').select('*, proyectos(*)').order('nombre', { ascending: true })
+      const { data: reps } = await supabase.from('reportes_operativos').select('*').order('created_at', { ascending: false })
 
-    if (proys) setProyectos(proys)
-    if (trabs) setTrabajadores(trabs as any)
-    if (reps) setReportes(reps)
+      if (proys) setProyectos(proys)
+      if (trabs) setTrabajadores(trabs)
+      if (reps) setReportes(reps)
+    } catch (err) {
+      console.error('Error cargando datos:', err)
+    } finally {
+      setCargando(false)
+    }
   }
 
-  async function guardarProyecto(e: React.FormEvent) {
+  // Verifica si el trabajador ya reportó el día de hoy
+  function haReportadoHoy(trabajadorId: string) {
+    const hoyStr = new Date().toISOString().split('T')[0]
+    return reportes.find(r => r.trabajador_id === trabajadorId && r.created_at.startsWith(hoyStr))
+  }
+
+  async function toggleActivoTrabajador(id: string, estadoActual: boolean) {
+    await supabase.from('trabajadores').update({ activo: !estadoActual }).eq('id', id)
+    cargarDatos()
+  }
+
+  async function crearTrabajador(e: React.FormEvent) {
+    e.preventDefault()
+    if (!nombre || !telefono || !proyectoId) return
+    const telLimpio = telefono.replace(/\D/g, '')
+
+    await supabase.from('trabajadores').insert({
+      nombre,
+      telefono: telLimpio,
+      proyecto_id: proyectoId,
+      cargo,
+      jornada,
+      activo: true,
+      estado_conversacion: 'inactivo'
+    })
+
+    setNombre('')
+    setTelefono('')
+    cargarDatos()
+  }
+
+  async function crearProyecto(e: React.FormEvent) {
     e.preventDefault()
     if (!nombreProyecto) return
 
-    if (editingProyectoId) {
-      await supabase.from('proyectos').update({
-        nombre: nombreProyecto,
-        fecha_inicio: fechaInicio,
-        fecha_fin: fechaFin || null
-      }).eq('id', editingProyectoId)
-      setEditingProyectoId(null)
-    } else {
-      await supabase.from('proyectos').insert({
-        nombre: nombreProyecto,
-        fecha_inicio: fechaInicio,
-        fecha_fin: fechaFin || null,
-        activo: true
-      })
-    }
+    await supabase.from('proyectos').insert({
+      nombre: nombreProyecto,
+      ubicacion: ubicacionProyecto || 'General'
+    })
 
     setNombreProyecto('')
-    setFechaFin('')
+    setUbicacionProyecto('')
     cargarDatos()
-  }
-
-  function prepararEdicionProyecto(p: Proyecto) {
-    setEditingProyectoId(p.id)
-    setNombreProyecto(p.nombre)
-    setFechaInicio(p.fecha_inicio)
-    setFechaFin(p.fecha_fin || '')
-  }
-
-  async function eliminarProyecto(id: string) {
-    if (!confirm('¿Deseas eliminar este proyecto? Los reportes asociados podrían quedar sin referencia.')) return
-    await supabase.from('proyectos').delete().eq('id', id)
-    cargarDatos()
-  }
-
-  async function guardarTrabajador(e: React.FormEvent) {
-    e.preventDefault()
-    if (!nombreTrabajador || !telefonoTrabajador) return
-
-    const cleanPhone = telefonoTrabajador.replace(/\D/g, '')
-
-    if (editingTrabajadorId) {
-      await supabase.from('trabajadores').update({
-        nombre: nombreTrabajador,
-        telefono: cleanPhone,
-        proyecto_id: proyectoSeleccionado || null,
-        jornada: jornadaTrabajador
-      }).eq('id', editingTrabajadorId)
-      setEditingTrabajadorId(null)
-    } else {
-      await supabase.from('trabajadores').insert({
-        nombre: nombreTrabajador,
-        telefono: cleanPhone,
-        proyecto_id: proyectoSeleccionado || null,
-        jornada: jornadaTrabajador,
-        activo: true
-      })
-    }
-
-    setNombreTrabajador('')
-    setTelefonoTrabajador('')
-    setProyectoSeleccionado('')
-    cargarDatos()
-  }
-
-  function prepararEdicionTrabajador(t: Trabajador) {
-    setEditingTrabajadorId(t.id)
-    setNombreTrabajador(t.nombre)
-    setTelefonoTrabajador(t.telefono)
-    setProyectoSeleccionado(t.proyecto_id || '')
-    setJornadaTrabajador(t.jornada)
-  }
-
-  async function eliminarTrabajador(id: string) {
-    if (!confirm('¿Eliminar trabajador del directorio?')) return
-    await supabase.from('trabajadores').delete().eq('id', id)
-    cargarDatos()
-  }
-
-  function exportarCSV() {
-    if (reportes.length === 0) return alert('No hay reportes para exportar')
-    const cabecera = 'Fecha,Proyecto,Trabajador,Pilote,Metros PQ,Ensanche,Encamisado,Observaciones\n'
-    const filas = reportes.map(r => 
-      `"${r.created_at.slice(0,10)}","${r.proyecto_nombre}","${r.trabajador_nombre}","${r.pilote}",${r.avance_pq},${r.ensanche},${r.encamisado},"${r.observaciones || ''}"`
-    ).join('\n')
-
-    const blob = new Blob([cabecera + filas], { type: 'text/csv;charset=utf-8;' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.setAttribute('download', `reportes_perforacion_${new Date().toISOString().split('T')[0]}.csv`)
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-6 md:p-10 font-sans">
-      <header className="max-w-6xl mx-auto mb-8 pb-6 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Control Operativo de Frentes</h1>
-          <p className="text-slate-400 mt-1">Supervisión de perforación, pilotes y recopilación por WhatsApp.</p>
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
+      {/* Header */}
+      <header className="border-b border-slate-800 bg-slate-900/50 backdrop-blur px-6 py-4 flex flex-wrap justify-between items-center gap-4">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400 font-bold">
+            JHF
+          </div>
+          <div>
+            <h1 className="text-lg font-bold tracking-tight text-white">JHF Perforaciones S.A.S.</h1>
+            <p className="text-xs text-slate-400">Control Operativo & Minuta Diaria</p>
+          </div>
         </div>
-        <div className="flex gap-2 bg-slate-900 p-1 border border-slate-800 rounded-lg">
+
+        {/* Pestañas */}
+        <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-1 text-xs font-medium">
           <button
-            onClick={() => setTab('config')}
-            className={`px-4 py-2 rounded-md text-sm font-medium transition ${
-              tab === 'config' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
-            }`}
+            onClick={() => setTab('monitor')}
+            className={`px-3 py-1.5 rounded-md transition ${tab === 'monitor' ? 'bg-sky-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
           >
-            Frentes y Personal
+            📊 Monitor de Hoy
           </button>
           <button
-            onClick={() => setTab('reportes')}
-            className={`px-4 py-2 rounded-md text-sm font-medium transition ${
-              tab === 'reportes' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
-            }`}
+            onClick={() => setTab('bitacora')}
+            className={`px-3 py-1.5 rounded-md transition ${tab === 'bitacora' ? 'bg-sky-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
           >
-            Bitácora de Reportes
+            📋 Bitácora de Reportes ({reportes.length})
+          </button>
+          <button
+            onClick={() => setTab('configuracion')}
+            className={`px-3 py-1.5 rounded-md transition ${tab === 'configuracion' ? 'bg-sky-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+          >
+            ⚙️ Personal y Obras
           </button>
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto">
-        {tab === 'config' ? (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            {/* PROYECTOS */}
-            <section className="bg-slate-900 border border-slate-800 rounded-xl p-6">
-              <div className="flex justify-between items-center mb-4">
-                <h2 className="text-xl font-semibold text-emerald-400">Proyectos y Obras</h2>
-                {editingProyectoId && (
-                  <button onClick={() => { setEditingProyectoId(null); setNombreProyecto(''); }} className="text-xs text-slate-400 underline">
-                    Cancelar edición
-                  </button>
-                )}
-              </div>
-              
-              <form onSubmit={guardarProyecto} className="space-y-4 mb-6 bg-slate-800/50 p-4 rounded-lg">
-                <input
-                  type="text"
-                  placeholder="Nombre de la obra (Ej. Pilotes Medellín)"
-                  value={nombreProyecto}
-                  onChange={e => setNombreProyecto(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white"
-                  required
-                />
-                <div className="grid grid-cols-2 gap-3">
-                  <input
-                    type="date"
-                    value={fechaInicio}
-                    onChange={e => setFechaInicio(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white"
-                    required
-                  />
-                  <input
-                    type="date"
-                    placeholder="Fecha fin"
-                    value={fechaFin}
-                    onChange={e => setFechaFin(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white"
-                  />
-                </div>
-                <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded-md text-sm font-medium transition">
-                  {editingProyectoId ? 'Guardar Cambios' : 'Registrar Proyecto'}
-                </button>
-              </form>
-
-              <div className="space-y-3">
-                {proyectos.map(p => (
-                  <div key={p.id} className="p-3 bg-slate-950 border border-slate-800 rounded-lg flex justify-between items-center">
-                    <div>
-                      <p className="font-medium text-white">{p.nombre}</p>
-                      <p className="text-xs text-slate-500">{p.fecha_inicio} {p.fecha_fin ? `al ${p.fecha_fin}` : '(En curso)'}</p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button onClick={() => prepararEdicionProyecto(p)} className="text-xs text-slate-400 hover:text-white px-2 py-1">
-                        Editar
-                      </button>
-                      <button
-                        onClick={async () => {
-                          await supabase.from('proyectos').update({ activo: !p.activo }).eq('id', p.id)
-                          cargarDatos()
-                        }}
-                        className={`text-xs px-2.5 py-1 rounded-md font-medium ${
-                          p.activo ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-red-950 text-red-400 border border-red-800'
-                        }`}
-                      >
-                        {p.activo ? 'Activo' : 'Cerrado'}
-                      </button>
-                      <button onClick={() => eliminarProyecto(p.id)} className="text-xs text-red-400 hover:text-red-300 px-2 py-1">
-                        ✕
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
-
-            {/* TRABAJADORES */}
-            <section className="bg-slate-900 border border-slate-800 rounded-xl p-6">
-              <div className="flex justify-between items-center mb-4">
-                <h2 className="text-xl font-semibold text-sky-400">Perforadores y Operadores</h2>
-                {editingTrabajadorId && (
-                  <button onClick={() => { setEditingTrabajadorId(null); setNombreTrabajador(''); setTelefonoTrabajador(''); }} className="text-xs text-slate-400 underline">
-                    Cancelar edición
-                  </button>
-                )}
-              </div>
-
-              <form onSubmit={guardarTrabajador} className="space-y-4 mb-6 bg-slate-800/50 p-4 rounded-lg">
-                <input
-                  type="text"
-                  placeholder="Nombre completo"
-                  value={nombreTrabajador}
-                  onChange={e => setNombreTrabajador(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white"
-                  required
-                />
-                <input
-                  type="text"
-                  placeholder="WhatsApp (con país, ej: 573103953485)"
-                  value={telefonoTrabajador}
-                  onChange={e => setTelefonoTrabajador(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white"
-                  required
-                />
-                <div className="grid grid-cols-2 gap-3">
-                  <select
-                    value={proyectoSeleccionado}
-                    onChange={e => setProyectoSeleccionado(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white"
-                  >
-                    <option value="">Sin asignar</option>
-                    {proyectos.filter(p => p.activo).map(p => (
-                      <option key={p.id} value={p.id}>{p.nombre}</option>
-                    ))}
-                  </select>
-                  <select
-                    value={jornadaTrabajador}
-                    onChange={e => setJornadaTrabajador(e.target.value as any)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-white"
-                  >
-                    <option value="L-V">Lunes a Viernes</option>
-                    <option value="L-S">Lunes a Sábado</option>
-                  </select>
-                </div>
-                <button type="submit" className="w-full bg-sky-600 hover:bg-sky-500 text-white py-2 rounded-md text-sm font-medium transition">
-                  {editingTrabajadorId ? 'Guardar Cambios' : 'Registrar Perforador'}
-                </button>
-              </form>
-
-              <div className="space-y-3">
-                {trabajadores.map(t => (
-                  <div key={t.id} className="p-3 bg-slate-950 border border-slate-800 rounded-lg flex justify-between items-center">
-                    <div>
-                      <p className="font-medium text-white">{t.nombre}</p>
-                      <p className="text-xs text-slate-500">+{t.telefono} | {t.proyectos?.nombre || 'Sin obra'} | <span className="text-sky-400">{t.jornada}</span></p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button onClick={() => prepararEdicionTrabajador(t)} className="text-xs text-slate-400 hover:text-white px-2 py-1">
-                        Editar
-                      </button>
-                      <button
-                        onClick={async () => {
-                          await supabase.from('trabajadores').update({ activo: !t.activo }).eq('id', t.id)
-                          cargarDatos()
-                        }}
-                        className={`text-xs px-2.5 py-1 rounded-md font-medium ${
-                          t.activo ? 'bg-sky-950 text-sky-400 border border-sky-800' : 'bg-slate-800 text-slate-400 border border-slate-700'
-                        }`}
-                      >
-                        {t.activo ? 'Activo' : 'Pausa'}
-                      </button>
-                      <button onClick={() => eliminarTrabajador(t.id)} className="text-xs text-red-400 hover:text-red-300 px-2 py-1">
-                        ✕
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
-          </div>
-        ) : (
-          /* BITÁCORA DE REPORTES */
-          <section className="bg-slate-900 border border-slate-800 rounded-xl p-6">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
+      {/* Contenido Principal */}
+      <main className="flex-1 p-6 max-w-7xl w-full mx-auto">
+        {/* PESTAÑA 1: MONITOR DE HOY */}
+        {tab === 'monitor' && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
               <div>
-                <h2 className="text-xl font-semibold text-white">Historial de Reportes Diarios</h2>
-                <p className="text-xs text-slate-400 mt-0.5">Avances de PQ, ensanches y encamisados procesados.</p>
+                <h2 className="text-base font-semibold text-white">Estado de Reportes de Hoy</h2>
+                <p className="text-xs text-slate-400">Monitoreo en tiempo real de frentes activos y pendientes</p>
               </div>
               <button
-                onClick={exportarCSV}
-                className="bg-emerald-700 hover:bg-emerald-600 text-white px-4 py-2 rounded-md text-xs font-semibold uppercase tracking-wider transition self-start sm:self-auto"
+                onClick={cargarDatos}
+                className="text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded-md transition"
               >
-                Descargar Excel (CSV)
+                🔄 Actualizar
+              </button>
+            </div>
+
+            {/* Tarjetas de estado */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {trabajadores.map(t => {
+                const reporteHoy = haReportadoHoy(t.id)
+                return (
+                  <div
+                    key={t.id}
+                    className={`border rounded-xl p-4 bg-slate-900/60 flex flex-col justify-between transition ${
+                      !t.activo
+                        ? 'border-slate-800 opacity-60'
+                        : reporteHoy
+                        ? 'border-emerald-500/40 bg-emerald-950/10'
+                        : 'border-amber-500/40 bg-amber-950/10'
+                    }`}
+                  >
+                    <div>
+                      <div className="flex justify-between items-start gap-2 mb-2">
+                        <div>
+                          <h3 className="font-semibold text-sm text-white">{t.nombre}</h3>
+                          <p className="text-xs text-slate-400">+{t.telefono} • {t.cargo}</p>
+                        </div>
+                        {/* Estado */}
+                        {!t.activo ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
+                            En pausa hoy
+                          </span>
+                        ) : reporteHoy ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Reportado
+                          </span>
+                        ) : (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-950 text-amber-400 border border-amber-800 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" /> Pendiente
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="text-xs text-slate-300 mt-2 bg-slate-950/40 p-2.5 rounded border border-slate-800/80">
+                        <div className="text-[11px] text-slate-400">Frente de Obra:</div>
+                        <div className="font-medium text-sky-400">{t.proyectos?.nombre || 'General'}</div>
+
+                        {reporteHoy && (
+                          <div className="mt-2 pt-2 border-t border-slate-800/60">
+                            <div className="text-[11px] text-emerald-400 font-medium">Último reporte:</div>
+                            <div className="text-[11px] text-slate-300 line-clamp-2 mt-0.5">
+                              {reporteHoy.observaciones || 'Reporte asentado'}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 pt-3 border-t border-slate-800/80 flex justify-between items-center text-xs">
+                      <span className="text-[11px] text-slate-500">Jornada: {t.jornada}</span>
+                      <button
+                        onClick={() => toggleActivoTrabajador(t.id, t.activo)}
+                        className={`text-[11px] px-2.5 py-1 rounded transition font-medium ${
+                          t.activo
+                            ? 'bg-red-950/40 hover:bg-red-900/50 text-red-300 border border-red-800/50'
+                            : 'bg-emerald-950/40 hover:bg-emerald-900/50 text-emerald-300 border border-emerald-800/50'
+                        }`}
+                      >
+                        {t.activo ? 'Pausar envío' : 'Activar envío'}
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* PESTAÑA 2: BITÁCORA DE REPORTES */}
+        {tab === 'bitacora' && (
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <div>
+                <h2 className="text-base font-semibold text-white">Bitácora Oficial de Perforación</h2>
+                <p className="text-xs text-slate-400">Historial consolidado recibido vía WhatsApp</p>
+              </div>
+              <button
+                onClick={cargarDatos}
+                className="text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded-md transition"
+              >
+                🔄 Refrescar
               </button>
             </div>
 
             {reportes.length === 0 ? (
-              <div className="text-center py-12 border border-dashed border-slate-800 rounded-lg text-slate-500 text-sm">
-                Aún no hay reportes recibidos hoy. Los reportes validados por WhatsApp aparecerán aquí automáticamente.
+              <div className="p-12 text-center text-slate-500 border border-slate-800 rounded-xl bg-slate-900/20">
+                Aún no hay reportes confirmados registrados en el sistema.
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm text-slate-300">
-                  <thead className="bg-slate-950 text-xs uppercase text-slate-400 border-b border-slate-800">
+              <div className="overflow-x-auto border border-slate-800 rounded-xl bg-slate-900/30">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-900/80 border-b border-slate-800 text-slate-400">
                     <tr>
-                      <th className="p-3">Fecha</th>
-                      <th className="p-3">Frente / Obra</th>
-                      <th className="p-3">Perforador</th>
-                      <th className="p-3">Pilote</th>
-                      <th className="p-3">Avance PQ</th>
-                      <th className="p-3">Ensanche</th>
-                      <th className="p-3">Encamisado</th>
-                      <th className="p-3">Estado</th>
+                      <th className="p-3">Fecha/Hora</th>
+                      <th className="p-3">Operador</th>
+                      <th className="p-3">Obra</th>
+                      <th className="p-3">Tipo</th>
+                      <th className="p-3">Pilote / Sondeo</th>
+                      <th className="p-3">Avance</th>
+                      <th className="p-3">Observaciones / Detalle</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-800">
+                  <tbody className="divide-y divide-slate-800/50">
                     {reportes.map(r => (
-                      <tr key={r.id} className="hover:bg-slate-800/40">
-                        <td className="p-3 text-xs">{r.created_at.slice(0, 10)}</td>
-                        <td className="p-3 font-medium text-white">{r.proyecto_nombre}</td>
-                        <td className="p-3">{r.trabajador_nombre}</td>
-                        <td className="p-3 text-sky-400 font-semibold">{r.pilote}</td>
-                        <td className="p-3">{r.avance_pq} m</td>
-                        <td className="p-3">{r.ensanche} m</td>
-                        <td className="p-3">{r.encamisado} m</td>
+                      <tr key={r.id} className="hover:bg-slate-800/20 transition">
+                        <td className="p-3 whitespace-nowrap text-slate-400">
+                          {new Date(r.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })}
+                        </td>
+                        <td className="p-3 font-medium text-white">{r.trabajador_nombre}</td>
+                        <td className="p-3 text-sky-400">{r.proyecto_nombre}</td>
                         <td className="p-3">
-                          <span className="text-xs px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800">
-                            Validado
+                          <span className="px-2 py-0.5 rounded text-[10px] uppercase font-semibold bg-slate-800 text-slate-300">
+                            {r.tipo_operacion}
                           </span>
+                        </td>
+                        <td className="p-3 font-bold text-amber-400">{r.pilote || r.sondeo || '—'}</td>
+                        <td className="p-3 whitespace-nowrap">
+                          {r.tipo_operacion === 'pilote'
+                            ? `PQ: ${r.avance_pq}m | Ens: ${r.ensanche}m`
+                            : r.tipo_operacion === 'estudio_suelo'
+                            ? `NQ: ${r.metros_nq}m | SPT: ${r.ensayos_spt}`
+                            : 'Logística'}
+                        </td>
+                        <td className="p-3 text-slate-300 max-w-xs truncate" title={r.observaciones}>
+                          {r.observaciones}
                         </td>
                       </tr>
                     ))}
@@ -410,7 +315,131 @@ export default function ConsolaAdmin() {
                 </table>
               </div>
             )}
-          </section>
+          </div>
+        )}
+
+        {/* PESTAÑA 3: CONFIGURACIÓN DE PERSONAL Y OBRAS */}
+        {tab === 'configuracion' && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Registro de Trabajador */}
+            <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
+              <h3 className="text-sm font-semibold text-white mb-1">Registrar Operador en WhatsApp</h3>
+              <p className="text-xs text-slate-400 mb-4">El bot solo responderá a números autorizados en esta lista.</p>
+
+              <form onSubmit={crearTrabajador} className="space-y-3 text-xs">
+                <div>
+                  <label className="block text-slate-400 mb-1">Nombre Completo</label>
+                  <input
+                    type="text"
+                    required
+                    value={nombre}
+                    onChange={e => setNombre(e.target.value)}
+                    placeholder="Ej: Wilson Mocoa"
+                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-400 mb-1">Teléfono (con indicativo o local)</label>
+                    <input
+                      type="text"
+                      required
+                      value={telefono}
+                      onChange={e => setTelefono(e.target.value)}
+                      placeholder="Ej: 3209511767 o 57320..."
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">Cargo</label>
+                    <select
+                      value={cargo}
+                      onChange={e => setCargo(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                    >
+                      <option value="Perforador">Perforador</option>
+                      <option value="Auxiliar">Auxiliar</option>
+                      <option value="Residente">Residente</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-400 mb-1">Frente Asignado</label>
+                    <select
+                      required
+                      value={proyectoId}
+                      onChange={e => setProyectoId(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                    >
+                      <option value="">Selecciona obra...</option>
+                      {proyectos.map(p => (
+                        <option key={p.id} value={p.id}>{p.nombre}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">Jornada</label>
+                    <select
+                      value={jornada}
+                      onChange={e => setJornada(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                    >
+                      <option value="L-S">Lunes a Sábado</option>
+                      <option value="L-V">Lunes a Viernes</option>
+                      <option value="Todos">Domingos incluidos</option>
+                    </select>
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full bg-sky-600 hover:bg-sky-500 text-white font-medium py-2 rounded transition mt-2"
+                >
+                  Registrar Personal
+                </button>
+              </form>
+            </div>
+
+            {/* Crear Obra */}
+            <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
+              <h3 className="text-sm font-semibold text-white mb-1">Crear Frente de Trabajo / Proyecto</h3>
+              <p className="text-xs text-slate-400 mb-4">Proyectos activos para asociación en bitácora.</p>
+
+              <form onSubmit={crearProyecto} className="space-y-3 text-xs">
+                <div>
+                  <label className="block text-slate-400 mb-1">Nombre del Proyecto</label>
+                  <input
+                    type="text"
+                    required
+                    value={nombreProyecto}
+                    onChange={e => setNombreProyecto(e.target.value)}
+                    placeholder="Ej: Pilotaje Autopista Norte / Ubaque"
+                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Ubicación / Tramo</label>
+                  <input
+                    type="text"
+                    value={ubicacionProyecto}
+                    onChange={e => setUbicacionProyecto(e.target.value)}
+                    placeholder="Ej: Bogotá D.C. / K16+000"
+                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full bg-slate-800 hover:bg-slate-700 text-white font-medium py-2 rounded transition mt-2 border border-slate-700"
+                >
+                  Crear Proyecto
+                </button>
+              </form>
+            </div>
+          </div>
         )}
       </main>
     </div>
