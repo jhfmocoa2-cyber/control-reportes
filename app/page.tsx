@@ -60,7 +60,7 @@ export default function Home() {
   const [nombreProyecto, setNombreProyecto] = useState('')
   const [ubicacionProyecto, setUbicacionProyecto] = useState('')
 
-  // Estado de edición de trabajador
+  // Modal de edición
   const [editandoTrabajador, setEditandoTrabajador] = useState<Trabajador | null>(null)
 
   useEffect(() => {
@@ -108,6 +108,35 @@ export default function Home() {
     alert('✅ ¡Obra guardada exitosamente!')
     setNombreProyecto('')
     setUbicacionProyecto('')
+    cargarDatos()
+  }
+
+  async function finalizarObra(id: string, nombreObra: string) {
+    const totalTrabs = trabajadores.filter(t => t.proyecto_id === id).length
+    const confirmar = confirm(
+      `¿Deseas finalizar y cerrar la obra "${nombreObra}"?\n\n` +
+      `⚠️ Acción:\n` +
+      `• Se darán de baja y eliminarán los ${totalTrabs} operarios asignados a este frente.\n` +
+      `• El bot no volverá a escribirles ni a incluirlos en los consolidados.\n` +
+      `• El historial en la Bitácora se mantiene intacto.`
+    )
+
+    if (!confirmar) return
+
+    // 1. Eliminar trabajadores asignados a esa obra
+    const { error: errTrabs } = await supabase.from('trabajadores').delete().eq('proyecto_id', id)
+    if (errTrabs) {
+      console.warn('Fallback: Desactivando trabajadores...', errTrabs)
+      await supabase.from('trabajadores').update({ activo: false }).eq('proyecto_id', id)
+    }
+
+    // 2. Eliminar la obra
+    const { error: errProy } = await supabase.from('proyectos').delete().eq('id', id)
+    if (errProy) {
+      console.warn('Error al borrar obra:', errProy)
+    }
+
+    alert(`🏁 Obra "${nombreObra}" finalizada con éxito. Operarios desvinculados del bot.`)
     cargarDatos()
   }
 
@@ -256,7 +285,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* MODAL DE EDICIÓN DE TRABAJADOR */}
+        {/* MODAL EDITAR OPERADOR */}
         {editandoTrabajador && (
           <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 max-w-md w-full text-xs shadow-2xl">
@@ -498,7 +527,7 @@ export default function Home() {
                       <th className="p-3">Observaciones / Detalle</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y border-slate-800/50">
+                  <tbody className="divide-y divide-slate-800/50">
                     {reportes.map(r => (
                       <tr key={r.id} className="hover:bg-slate-800/20 transition">
                         <td className="p-3 whitespace-nowrap text-slate-400">
@@ -655,7 +684,41 @@ export default function Home() {
               </div>
             </div>
 
-            {/* LISTA COMPLETA DE OPERARIOS REGISTRADOS */}
+            {/* GESTIÓN DE OBRAS Y FINALIZACIÓN */}
+            <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
+              <h3 className="text-sm font-semibold text-white mb-1">Frentes de Obra en Ejecución ({proyectos.length})</h3>
+              <p className="text-xs text-slate-400 mb-3">
+                Finalizar una obra cierra el frente y desvincula automáticamente a sus operarios de las rondas de mensajes.
+              </p>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {proyectos.map(p => {
+                  const trabsEnObra = trabajadores.filter(t => t.proyecto_id === p.id)
+                  return (
+                    <div key={p.id} className="p-3 bg-slate-950 rounded-lg border border-slate-800 flex flex-col justify-between">
+                      <div>
+                        <div className="font-semibold text-sky-400 text-xs">{p.nombre}</div>
+                        <div className="text-[11px] text-slate-500">{p.ubicacion}</div>
+                        <div className="mt-2 text-[11px] text-slate-400">
+                          👥 Operadores activos: <span className="font-bold text-white">{trabsEnObra.length}</span>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 pt-2 border-t border-slate-800/60 flex justify-end">
+                        <button
+                          onClick={() => finalizarObra(p.id, p.nombre)}
+                          className="text-[11px] px-2.5 py-1 rounded bg-red-950/60 hover:bg-red-900/70 text-red-300 border border-red-800/60 font-medium transition"
+                        >
+                          🏁 Finalizar Obra
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
+            {/* LISTA DE OPERARIOS */}
             <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
               <h3 className="text-sm font-semibold text-white mb-3">Personal Registrado en Sistema ({trabajadores.length})</h3>
               <div className="overflow-x-auto">
