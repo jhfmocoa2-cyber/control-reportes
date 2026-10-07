@@ -11,12 +11,14 @@ export async function GET() {
       .from('trabajadores')
       .select('*, proyectos(nombre)')
       .eq('activo', true)
+      .order('nombre', { ascending: true })
 
     const hoyStr = new Date().toISOString().split('T')[0]
     const { data: reportesHoy } = await supabase
       .from('reportes_operativos')
       .select('*')
       .gte('created_at', `${hoyStr}T00:00:00.000Z`)
+      .order('created_at', { ascending: false })
 
     const { data: cfg } = await supabase
       .from('sistema_config')
@@ -32,7 +34,7 @@ export async function GET() {
       texto += 
         `👷‍♂️ *Buenas noches, Don Jaime y Miguel.*\n` +
         `Le saluda el Sistema de Control Operativo de *JHF Perforaciones S.A.S.*\n\n` +
-        `A partir de hoy, este canal consolidará diariamente las bitácoras técnicas de todos los frentes activos (pilotaje, sondeos, novedades mecánicas y stand-by) de forma automática.\n\n` +
+        `A partir de hoy, este canal consolidará diariamente las bitácoras técnicas de todos los frentes activos (estudios de suelos, sondeos, pilotaje y novedades en obra) de forma automática.\n\n` +
         `A continuación, el consolidado de la jornada de hoy:\n\n`
     }
 
@@ -45,12 +47,14 @@ export async function GET() {
       texto += `${i + 1}️⃣ *${t.nombre}* (${frente}):\n`
 
       if (rep) {
-        if (rep.tipo_operacion === 'pilote') {
-          texto += `   • Pilote ${rep.pilote || 'N/A'}: PQ ${rep.avance_pq}m | Ensanche ${rep.ensanche}m | Camisa ${rep.encamisado}m\n`
-        } else if (rep.tipo_operacion === 'estudio_suelo') {
-          texto += `   • Sondeo ${rep.sondeo || 'N/A'}: ${rep.metros_nq}m NQ | ${rep.ensayos_spt} SPT\n`
+        if (rep.tipo_operacion === 'estudio_suelo') {
+          const sptTxt = rep.ensayos_spt ? ` | ${rep.ensayos_spt} SPT` : ''
+          texto += `   • *Sondeo ${rep.sondeo || 'S-01'}:* Avance ${rep.metros_nq || 0} m${sptTxt}\n`
+          if (rep.observaciones) texto += `   • *Nota:* ${rep.observaciones}\n`
+        } else if (rep.tipo_operacion === 'pilote') {
+          texto += `   • *Pilote ${rep.pilote || 'P-01'}:* PQ ${rep.avance_pq}m | Ensanche ${rep.ensanche}m | Camisa ${rep.encamisado}m\n`
         } else {
-          texto += `   • Novedad / Actividad: ${rep.observaciones}\n`
+          texto += `   • *Novedad / Actividad:* ${rep.observaciones}\n`
         }
       } else {
         texto += `   • ⚠️ *Sin reporte registrado en la jornada*\n`
