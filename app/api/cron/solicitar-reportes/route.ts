@@ -26,7 +26,6 @@ export async function GET() {
     const errores: string[] = []
 
     for (const t of trabajadores) {
-      // Verificar si ya reportó hoy
       const { data: reporteHoy } = await supabase
         .from('reportes_operativos')
         .select('id')
@@ -36,24 +35,33 @@ export async function GET() {
 
       if (!reporteHoy || reporteHoy.length === 0) {
         const frente = t.proyectos?.nombre || 'su frente asignado'
-        
-        // Enviar plantilla oficial aprobada por Meta (Abre la ventana proactivamente)
-        const resultado = await enviarPlantillaWhatsApp(t.telefono, t.nombre, frente)
+        const mensajeTexto = 
+          `👋 *Hola, ${t.nombre}.*\n` +
+          `Te saluda el Sistema de Control Operativo de *JHF Perforaciones S.A.S.*\n\n` +
+          `¿Cómo les fue hoy en *${frente}*? Por favor cuéntanos qué avance tuvieron en metros o novedades en obra para la bitácora diaria.`
 
-        if (resultado.ok) {
+        // Intento 1: Plantilla
+        let resEnvio = await enviarPlantillaMeta(t.telefono)
+
+        // Intento 2: Respaldo inmediato a texto libre si la plantilla no está lista
+        if (!resEnvio.ok) {
+          resEnvio = await enviarTextoLibre(t.telefono, mensajeTexto)
+        }
+
+        if (resEnvio.ok) {
           await supabase.from('trabajadores').update({
             estado_conversacion: 'esperando_reporte_diario',
             bienvenida_enviada: true
           }).eq('id', t.id)
           enviados++
         } else {
-          errores.push(`${t.nombre} (+${t.telefono}): ${resultado.error}`)
+          errores.push(`${t.nombre} (+${t.telefono}): ${resEnvio.error}`)
         }
       }
     }
 
     return NextResponse.json({
-      status: 'reminders_sent',
+      status: 'round_triggered',
       count: enviados,
       errores
     })
@@ -62,50 +70,69 @@ export async function GET() {
   }
 }
 
-async function enviarPlantillaWhatsApp(
-  to: string,
-  nombreOperador: string,
-  frenteNombre: string
-): Promise<{ ok: boolean; error?: string }> {
-  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
-    return { ok: false, error: 'Faltan credenciales de WhatsApp en Vercel' }
-  }
+async function enviarPlantillaMeta(to: string): Promise<{ ok: boolean; error?: string }> {
+  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) return { ok: false, error: 'Credenciales ausentes' }
 
   const cleanTo = to.replace(/\D/g, '')
   const recipient = cleanTo.startsWith('57') ? cleanTo : `57${cleanTo}`
 
-  const res = await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to: recipient,
-      type: 'template',
-      template: {
-        name: 'solicitud_reporte_diario',
-        language: {
-          code: 'es'
-        },
-        components: [
-          {
-            type: 'body',
-            parameters: [
-              { type: 'text', text: nombreOperador },
-              { type: 'text', text: frenteNombre }
-            ]
-          }
-        ]
-      }
+  try {
+    const res = await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: recipient,
+        type: 'template',
+        template: {
+          name: 'bienvenida_operativa',
+          language: { code: 'es' }
+        }
+      })
     })
-  })
 
-  const data = await res.json()
-  if (!res.ok || data.error) {
-    return { ok: false, error: data.error?.message || 'Error en plantilla Meta' }
+    const data = await res.json()
+    if (!res.ok || data.error) {
+      return { ok: false, error: data.error?.message || 'Plantilla rechazada por Meta' }
+    }
+    return { ok: true }
+  } catch (e: any) {
+    return { ok: false, error: e.message }
   }
-  return { ok: true }
+}
+
+async function enviarTextoLibre(to: string, text: string): Promise<{ ok: boolean; error?: string }> {
+  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) return { ok: false, error: 'Credenciales ausentes' }
+
+  const cleanTo = to.replace(/\D/g, '')
+  const recipient = cleanTo.startsWith('57') ? cleanTo : `57${cleanTo}`
+
+  try {
+    const res = await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: recipient,
+        type: 'text',
+        text: { body: text }
+      })
+    })
+
+    const data = await res.json()
+    if (!res.ok || data.error) {
+      return { ok: false, error: data.error?.message || 'Error enviando texto' }
+    }
+    return { ok: true }
+  } catch (e: any) {
+    return { ok: false, error: e.message }
+  }
 }

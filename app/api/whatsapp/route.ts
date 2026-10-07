@@ -51,7 +51,6 @@ export async function POST(req: Request) {
     const cleanFrom = from.replace(/\D/g, '')
     const localPhone = cleanFrom.startsWith('57') ? cleanFrom.slice(2) : cleanFrom
 
-    // 1. Identificar trabajador activo
     const { data: trabajadores } = await supabase
       .from('trabajadores')
       .select('*, proyectos(nombre)')
@@ -68,7 +67,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'unregistered_user' })
     }
 
-    // 2. Audios
     if (message.type === 'audio' || message.type === 'voice') {
       await enviarWhatsApp(
         from,
@@ -77,7 +75,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'audio_rejected' })
     }
 
-    // 3. Fotos / Imágenes
     if (message.type === 'image') {
       await enviarWhatsApp(
         from,
@@ -86,7 +83,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'image_received' })
     }
 
-    // 4. Procesamiento de Texto
     if (message.type === 'text') {
       const textoCrudo = message.text?.body?.trim() || ''
       const textoLimpio = quitarTildes(textoCrudo.toLowerCase())
@@ -95,7 +91,6 @@ export async function POST(req: Request) {
       const nombreOperador = trabajador.nombre
       const frenteNombre = trabajador.proyectos?.nombre || 'General'
 
-      // A. COMANDO DE CANCELACIÓN O REINICIO
       if (/\b(cancelar|anular|borrar|reiniciar|empezar de nuevo|borre eso)\b/i.test(textoLimpio)) {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'esperando_reporte_diario',
@@ -109,7 +104,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'cancelled' })
       }
 
-      // B. RESPUESTA AFIRMATIVA CUANDO ESTÁ ESPERANDO CONFIRMACIÓN
       if (estadoActual === 'esperando_confirmacion' && esConfirmacionPositiva(textoLimpio)) {
         const b: CanastaReporte = trabajador.borrador_reporte || {}
 
@@ -142,7 +136,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'saved' })
       }
 
-      // C. RESPUESTA NEGATIVA SIMPLE EN CONFIRMACIÓN
       if (estadoActual === 'esperando_confirmacion' && esNegacionSimple(textoLimpio)) {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'esperando_reporte_diario',
@@ -156,7 +149,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'confirmation_rejected' })
       }
 
-      // D. SALUDO ESTRICTO
       if (esSaludoEstricto(textoLimpio)) {
         await enviarWhatsApp(
           from,
@@ -165,7 +157,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'greeting_replied' })
       }
 
-      // E. SEGUIMIENTO DE VARADA MECÁNICA
       if (estadoActual === 'varada_preguntando_solucion') {
         if (!tieneAvanceTecnico(textoLimpio)) {
           const noVarado = /\b(no estoy|no estamos|no quedo|ya quedo|solucionado|listo|arreglado|trabajamos normal)\b/i.test(textoLimpio)
@@ -194,7 +185,6 @@ export async function POST(req: Request) {
         }
       }
 
-      // F. DETECCIÓN DE LLUVIA / CLIMA
       if (detectarLluvia(textoLimpio) && !tieneAvanceTecnico(textoLimpio) && estadoActual !== 'esperando_datos_faltantes') {
         const resumen =
           `👷 *Operador:* ${nombreOperador}\n` +
@@ -216,7 +206,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'rain_handled' })
       }
 
-      // G. DETECCIÓN DE FALLA MECÁNICA / VARADA
       if (detectarVaradaMecanica(textoLimpio) && !tieneAvanceTecnico(textoLimpio) && estadoActual !== 'esperando_datos_faltantes') {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'varada_preguntando_solucion',
@@ -230,7 +219,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'varada_followup' })
       }
 
-      // H. DETECCIÓN DE LOGÍSTICA / TRASTEO / ARMADO
       if (detectarLogisticaOStandby(textoLimpio) && !tieneAvanceTecnico(textoLimpio) && estadoActual !== 'esperando_datos_faltantes') {
         const resumen =
           `👷 *Operador:* ${nombreOperador}\n` +
@@ -250,7 +238,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'logistica_ready' })
       }
 
-      // I. EXTRACCIÓN TÉCNICA INTELIGENTE CON MEMORIA ACUMULATIVA
       const usarMemoria = estadoActual === 'esperando_datos_faltantes' || estadoActual === 'esperando_confirmacion'
       const nuevaCanasta = extraerDatosConDiccionarioCompleto(textoCrudo, usarMemoria ? canastaPrevia : {})
       const forzarCierre = Boolean(canastaPrevia.ya_pregunto) || estadoActual === 'esperando_datos_faltantes'
@@ -292,7 +279,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'unrecognized_short' })
       }
 
-      // Preguntar sondeo/pilote si faltó en el primer mensaje
       if (!forzarCierre && !nuevaCanasta.sondeo && !nuevaCanasta.pilote && (nuevaCanasta.metros || nuevaCanasta.ensayos_spt || nuevaCanasta.muestras_shelby)) {
         nuevaCanasta.ya_pregunto = true
         await supabase.from('trabajadores').update({
@@ -312,7 +298,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'asking_point_once' })
       }
 
-      // Preguntar metros si faltó en el primer mensaje
       if (!forzarCierre && (nuevaCanasta.sondeo || nuevaCanasta.pilote) && (nuevaCanasta.metros === null || nuevaCanasta.metros === undefined) && !nuevaCanasta.ensayos_spt && !nuevaCanasta.muestras_shelby) {
         nuevaCanasta.ya_pregunto = true
         await supabase.from('trabajadores').update({
@@ -328,7 +313,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'asking_meters_once' })
       }
 
-      // CONSTRUCCIÓN DEL RESUMEN FINAL
       const esPilote = nuevaCanasta.tipo === 'pilote' || Boolean(nuevaCanasta.pilote)
       let resumenFinal = ''
 
@@ -399,8 +383,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: err.message }, { status: 500 })
   }
 }
-
-// FUNCIONES AUXILIARES Y NORMALIZADOR
 
 function quitarTildes(texto: string): string {
   return texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
