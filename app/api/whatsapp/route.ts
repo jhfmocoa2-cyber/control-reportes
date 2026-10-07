@@ -6,19 +6,19 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || ''
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_ID || ''
 
 interface CanastaReporte {
-  tipo?: 'estudio_suelo' | 'pilote' | 'standby' | 'logistica'
-  sondeo?: string | null
-  pilote?: string | null
-  metros?: number | null
-  tramo_inicio?: number | null
-  tramo_fin?: number | null
-  cota_actual?: number | null
-  recobro?: string | null
-  ensayos_spt?: number | null
-  muestras_shelby?: number | null
-  pq?: number | null
-  ensanche?: number | null
-  encamisado?: number | null
+  tipo?: 'estudio_suelo' - 'pilote' - 'standby' - 'logistica'
+  sondeo?: string - null
+  pilote?: string - null
+  metros?: number - null
+  tramo_inicio?: number - null
+  tramo_fin?: number - null
+  cota_actual?: number - null
+  recobro?: string - null
+  ensayos_spt?: number - null
+  muestras_shelby?: number - null
+  pq?: number - null
+  ensanche?: number - null
+  encamisado?: number - null
   detalle?: string
   motivo_varada?: string
   resumen?: string
@@ -173,7 +173,7 @@ export async function POST(req: Request) {
           const sigueParado = !noVarado && /\b(sigue|parado|paralizado|manana|falta|repuesto|taller|torno|esperando)\b/i.test(textoLimpio)
           const situacion = noVarado ? 'SOLUCIONADO EN OBRA' : (sigueParado ? 'EQUIPO QUEDA PARADO' : 'NOVEDAD REPORTADA')
 
-          const detalleFinal = `${canastaPrevia.motivo_varada || 'Novedad'} | Estado: ${situacion} (${textoCrudo})`
+          const detalleFinal = `${canastaPrevia.motivo_varada || 'Novedad'} - Estado: ${situacion} (${textoCrudo})`
           const resumen =
             `👷 *Operador:* ${nombreOperador}\n` +
             `📍 *Frente:* ${frenteNombre}\n` +
