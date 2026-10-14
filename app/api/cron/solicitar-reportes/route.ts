@@ -18,12 +18,12 @@ export async function GET() {
       .eq('activo', true)
 
     if (!trabajadores || trabajadores.length === 0) {
-      return NextResponse.json({ status: 'no_active_workers', count: 0, errores: [] })
+      return NextResponse.json({ status: 'no_active_workers', count: 0, resultados: [] })
     }
 
     const inicioDiaColombia = obtenerInicioDiaColombiaUTC()
     let enviados = 0
-    const detalles: any[] = []
+    const resultados: any[] = []
 
     for (const t of trabajadores) {
       const { data: reporteHoy } = await supabase
@@ -40,15 +40,10 @@ export async function GET() {
           `Te saluda el Sistema de Control Operativo de *JHF Perforaciones S.A.S.*\n\n` +
           `¿Cómo les fue hoy en *${frente}*? Por favor cuéntanos qué avance tuvieron en metros o novedades en obra para la bitácora diaria.`
 
-        // Intento 1: Plantilla aprobada en español estándar (es)
-        let resEnvio = await enviarPlantillaAprobada(t.telefono, 'es')
+        // 1. Envío con la plantilla aprobada en Meta (notificacion_sistema_jhf)
+        let resEnvio = await enviarPlantillaMeta(t.telefono, 'notificacion_sistema_jhf', 'es')
 
-        // Intento 2: Si Meta pide código de región (es_LA)
-        if (!resEnvio.ok && resEnvio.error?.includes('132001')) {
-          resEnvio = await enviarPlantillaAprobada(t.telefono, 'es_LA')
-        }
-
-        // Intento 3: Respaldo por texto libre si la ventana ya estuviera abierta
+        // 2. Respaldo por texto libre si la ventana ya estuviera abierta
         if (!resEnvio.ok) {
           resEnvio = await enviarTextoLibre(t.telefono, mensajeTexto)
         }
@@ -59,9 +54,9 @@ export async function GET() {
             bienvenida_enviada: true
           }).eq('id', t.id)
           enviados++
-          detalles.push({ operador: t.nombre, estado: 'entregado', metodo: resEnvio.metodo })
+          resultados.push({ operador: t.nombre, telefono: t.telefono, entregado: true, metodo: resEnvio.metodo })
         } else {
-          detalles.push({ operador: t.nombre, estado: 'error', error: resEnvio.error })
+          resultados.push({ operador: t.nombre, telefono: t.telefono, entregado: false, error: resEnvio.error })
         }
       }
     }
@@ -69,14 +64,14 @@ export async function GET() {
     return NextResponse.json({
       status: 'round_triggered',
       total_enviados: enviados,
-      detalles
+      resultados
     })
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 })
   }
 }
 
-async function enviarPlantillaAprobada(to: string, langCode: string): Promise<{ ok: boolean; metodo?: string; error?: string }> {
+async function enviarPlantillaMeta(to: string, templateName: string, langCode: string): Promise<{ ok: boolean; metodo?: string; error?: string }> {
   if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) return { ok: false, error: 'Credenciales ausentes' }
 
   const cleanTo = to.replace(/\D/g, '')
@@ -95,7 +90,7 @@ async function enviarPlantillaAprobada(to: string, langCode: string): Promise<{ 
         to: recipient,
         type: 'template',
         template: {
-          name: 'notificacion_sistema_jhf',
+          name: templateName,
           language: { code: langCode }
         }
       })
@@ -105,7 +100,7 @@ async function enviarPlantillaAprobada(to: string, langCode: string): Promise<{ 
     if (!res.ok || data.error) {
       return { ok: false, error: data.error?.message || 'Error en plantilla' }
     }
-    return { ok: true, metodo: `plantilla_${langCode}` }
+    return { ok: true, metodo: `plantilla_${templateName}_${langCode}` }
   } catch (e: any) {
     return { ok: false, error: e.message }
   }
