@@ -5,9 +5,6 @@ const META_VERIFY_TOKEN = 'clave_secreta_reportes_2026'
 const META_MESSAGES_URL = 'https://graph.facebook.com/v19.0/1370874296109664/messages'
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent'
 
-// Llave ofuscada por seguridad de despliegue
-const KEY_PARTS = ['AQ.Ab8RN6', 'JKLPyYBY', 'lbnsjU0Q', 'Selbjn5L', 'GxLFb8Nc', '0tPuWPtbRYVg']
-
 type TipoOperacion = 'estudio_suelo' | 'pilote' | 'standby' | 'logistica'
 
 interface MensajeHistorial { role: string; text: string }
@@ -186,7 +183,16 @@ async function guardarOActualizarReporte(trabajador: any, d: DatosReporte, texto
 }
 
 async function consultarGeminiInteligente(mensaje: string, operador: string, frente: string, datosPrevios: DatosReporte, historial: MensajeHistorial[]) {
-  const geminiKey = (process.env.GEMINI_API_KEY || KEY_PARTS.join('')).trim()
+  const geminiKey = process.env.GEMINI_API_KEY?.trim()
+  
+  if (!geminiKey) {
+    console.error('❌ La variable GEMINI_API_KEY no existe en el entorno de Vercel.')
+    return {
+      accion: 'conversar',
+      respuesta_whatsapp: `Don ${operador}, tenemos un problema técnico con la conexión. Por favor, comuníquese con la administración.`,
+      datos_actualizados: { ...datosPrevios }
+    }
+  }
 
   const prompt = `
 Eres el Asistente Técnico de Operaciones de "JHF Perforaciones S.A.S." en Colombia.
@@ -239,7 +245,6 @@ Responde ÚNICAMENTE con un JSON válido siguiendo esta estructura:
     if (res.ok) {
       const data = await res.json()
       
-      // Control de seguridad de Google: Si el operario dice groserías, se le reconduce al tema técnico.
       if (data.candidates?.[0]?.finishReason === 'SAFETY') {
         return {
           accion: 'conversar',
@@ -262,7 +267,6 @@ Responde ÚNICAMENTE con un JSON válido siguiendo esta estructura:
     console.error('❌ Excepción llamando a Gemini:', e.message)
   }
 
-  // Respaldo de red
   return {
     accion: 'conversar',
     respuesta_whatsapp: `Don ${operador}, la señal está un poco inestable. ¿Podría repetirme la información técnica de su avance de hoy, por favor?`,
