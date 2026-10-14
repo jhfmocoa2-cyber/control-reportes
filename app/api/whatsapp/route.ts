@@ -73,7 +73,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'unregistered_user' })
     }
 
-    // CLIC EN BOTÓN DE PLANTILLA ("Confirmar recepción")
+    // CLIC EN BOTÓN DE PLANTILLA
     if (message.type === 'button' || message.type === 'interactive') {
       const nombreOperador = trabajador.nombre
       const frenteNombre = trabajador.proyectos?.nombre || 'General'
@@ -95,7 +95,7 @@ export async function POST(req: Request) {
     if (message.type === 'audio' || message.type === 'voice') {
       await enviarWhatsApp(
         from,
-        `👋 Hola ${trabajador.nombre}, este sistema automatizado no escucha audios. Por favor escríbeme en un mensajito corto cómo les fue hoy.`
+        `👋 Hola ${trabajador.nombre}, este sistema automatizado no escucha audios. Por favor escríbeme en un mensaje corto cómo les fue hoy.`
       )
       return NextResponse.json({ status: 'audio_rejected' })
     }
@@ -110,16 +110,18 @@ export async function POST(req: Request) {
 
     if (message.type === 'text') {
       const textoCrudo = message.text?.body?.trim() || ''
+      const textoNormalizado = normalizarTexto(textoCrudo)
       const estadoActual = trabajador.estado_conversacion || 'inactivo'
       const canastaPrevia: CanastaReporte = trabajador.borrador_reporte || {}
       const nombreOperador = trabajador.nombre
       const frenteNombre = trabajador.proyectos?.nombre || 'General'
 
-      // Analizar con Gemini AI
-      const ai = await analizarConGemini(textoCrudo, nombreOperador, frenteNombre, estadoActual, canastaPrevia)
+      // ==========================================
+      // 1. REGLAS DETERMINISTAS INMEDIATAS
+      // ==========================================
 
-      // 1. REINICIAR / CANCELAR
-      if (ai.categoria === 'reiniciar') {
+      // Cancelar / reiniciar en cualquier momento
+      if (/\b(cancelar|anular|borrar|reiniciar|empezar de nuevo|borre eso)\b/i.test(textoNormalizado)) {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'esperando_reporte_diario',
           borrador_reporte: null
@@ -132,8 +134,8 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'cancelled' })
       }
 
-      // 2. CONFIRMACIÓN POSITIVA
-      if (ai.categoria === 'confirmacion_positiva' && estadoActual === 'esperando_confirmacion') {
+      // Confirmación estricta cuando espera confirmación
+      if (estadoActual === 'esperando_confirmacion' && esConfirmacionPositiva(textoNormalizado)) {
         const b = canastaPrevia
 
         await supabase.from('reportes_operativos').insert({
@@ -165,8 +167,8 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'saved' })
       }
 
-      // 3. CONFIRMACIÓN NEGATIVA
-      if (ai.categoria === 'confirmacion_negativa' && estadoActual === 'esperando_confirmacion') {
+      // Rechazo o corrección cuando espera confirmación
+      if (estadoActual === 'esperando_confirmacion' && esNegacionSimple(textoNormalizado)) {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'esperando_reporte_diario',
           borrador_reporte: null
@@ -174,13 +176,13 @@ export async function POST(req: Request) {
 
         await enviarWhatsApp(
           from,
-          `✍️ Entendido ${nombreOperador}, no lo guardamos. Escríbeme de corrido cómo fue el avance o la actividad real de hoy para corregirlo.`
+          `✍️ Entendido ${nombreOperador}, descartado. Escríbeme el reporte correcto para registrarlo.`
         )
         return NextResponse.json({ status: 'confirmation_rejected' })
       }
 
-      // 4. DESPEDIDAS Y CORTESÍAS
-      if (ai.categoria === 'despedida_cortesia') {
+      // Cortesías y despedidas
+      if (esDespedidaOCortesia(textoNormalizado)) {
         if (estadoActual === 'esperando_confirmacion') {
           await supabase.from('trabajadores').update({
             estado_conversacion: 'inactivo',
@@ -195,32 +197,35 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'courtesy_replied' })
       }
 
-      // 5. BROMAS O MENSAJES SIN SENTIDO
-      if (ai.categoria === 'broma_o_sin_sentido') {
-        await enviarWhatsApp(
-          from,
-          ai.mensaje_al_operador || `😅 ¡Epa ${nombreOperador}! Cuéntame en serio cómo les fue hoy en *${frenteNombre}*: ¿cuántos metros perforaron o qué actividades hicieron?`
-        )
-        return NextResponse.json({ status: 'joke_handled' })
-      }
-
-      // 6. SALUDOS O DUDAS GENERALES
-      if (ai.categoria === 'saludo_o_duda') {
+      // Saludos simples
+      if (esSaludoSimple(textoNormalizado)) {
         if (estadoActual === 'inactivo') {
           await enviarWhatsApp(
             from,
-            `👋 Hola ${nombreOperador}, tu reporte de hoy ya está registrado en el sistema. Si deseas modificarlo o agregar algo, escribe *reiniciar*.`
+            `👋 Hola ${nombreOperador}, tu reporte de hoy ya está registrado en el sistema. Si deseas modificarlo, escribe *reiniciar*.`
           )
         } else {
           await enviarWhatsApp(
             from,
-            `👋 ¡Hola ${nombreOperador}! ¿Cómo les fue hoy en *${frenteNombre}*?\n\nCuéntame en qué sondeo o pilote estuvieron, cuántos metros avanzaron o qué actividades hicieron hoy.`
+            `👋 ¡Hola ${nombreOperador}! ¿Cómo les fue hoy en *${frenteNombre}*?\n\nCuéntame en qué punto trabajaron, cuántos metros avanzaron o qué actividades hicieron.`
           )
         }
         return NextResponse.json({ status: 'greeting_replied' })
       }
 
-      // 7. PREGUNTAR POR DATO FALTANTE
+      // ==========================================
+      // 2. PROCESAMIENTO SEMÁNTICO (GEMINI IA)
+      // ==========================================
+      const ai = await analizarConGemini(textoCrudo, nombreOperador, frenteNombre, estadoActual, canastaPrevia)
+
+      if (ai.categoria === 'broma_o_sin_sentido') {
+        await enviarWhatsApp(
+          from,
+          ai.mensaje_al_operador || `😅 ¡Epa ${nombreOperador}! Por favor cuéntame en serio cómo les fue hoy en *${frenteNombre}*: ¿cuántos metros perforaron o qué actividades hicieron?`
+        )
+        return NextResponse.json({ status: 'joke_handled' })
+      }
+
       if (ai.falta_dato && !canastaPrevia.ya_pregunto && estadoActual !== 'esperando_datos_faltantes') {
         const nuevaCanasta = { ...canastaPrevia, ...ai.datos_extraidos, ya_pregunto: true }
 
@@ -233,11 +238,26 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'asking_missing_data' })
       }
 
-      // 8. GENERAR FICHA DE RESUMEN Y SOLICITAR CONFIRMACIÓN
+      // Si no hay datos técnicos y no es un reporte válido
+      const tieneMetros = (ai.datos_extraidos?.metros !== null && ai.datos_extraidos?.metros !== undefined) || (ai.datos_extraidos?.pq || 0) > 0
+      const tienePunto = Boolean(ai.datos_extraidos?.sondeo || ai.datos_extraidos?.pilote)
+      const esNovedad = ai.categoria === 'novedad_operativa' || ai.datos_extraidos?.tipo === 'standby' || ai.datos_extraidos?.tipo === 'logistica'
+
+      if (!tieneMetros && !tienePunto && !esNovedad && !canastaPrevia.ya_pregunto) {
+        await enviarWhatsApp(
+          from,
+          `👋 Don ${nombreOperador}, no alcancé a captar los metros ni el sondeo. Por favor indícame en qué punto estuvieron y cuántos metros avanzaron hoy en *${frenteNombre}*.`
+        )
+        return NextResponse.json({ status: 'unclear_message' })
+      }
+
+      // ==========================================
+      // 3. GENERAR FICHA Y PEDIR CONFIRMACIÓN
+      // ==========================================
       const datosFinales: CanastaReporte = {
         ...canastaPrevia,
         ...ai.datos_extraidos,
-        detalle: canastaPrevia.detalle ? `${canastaPrevia.detalle} - ${textoCrudo}` : textoCrudo
+        detalle: canastaPrevia.detalle ? `${canastaPrevia.detalle} -${textoCrudo}` : textoCrudo
       }
 
       let resumen = ''
@@ -259,7 +279,7 @@ export async function POST(req: Request) {
           `• *Detalle:* ${datosFinales.detalle}`
       } else {
         const tramo = (datosFinales.tramo_inicio !== null && datosFinales.tramo_inicio !== undefined && datosFinales.tramo_fin !== null && datosFinales.tramo_fin !== undefined)
-          ? ` (De ${datosFinales.tramo_inicio} m a ${datosFinales.tramo_fin} m)`
+          ? ` (De ${datosFinales.tramo_inicio} m a${datosFinales.tramo_fin} m)`
           : ''
         const spt = datosFinales.ensayos_spt ? `\n• *Ensayos SPT:* ${datosFinales.ensayos_spt}` : ''
         const shelby = datosFinales.muestras_shelby ? `\n• *Muestras Shelby:* ${datosFinales.muestras_shelby}` : ''
@@ -298,6 +318,52 @@ export async function POST(req: Request) {
   }
 }
 
+function normalizarTexto(t: string): string {
+  return t
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '')
+    .trim()
+}
+
+function esConfirmacionPositiva(limpio: string): boolean {
+  const afirmaciones = [
+    'si', 'sii', 'siii', 'sip', 'si senor', 'correcto', 'ok', 'okay', 'listo',
+    'de acuerdo', 'confirmo', 'confirmado', 'guardar', 'asentar', 'dale',
+    'de una', 'asi es', 'esta bien', 'perfecto', 'bien', 'claro', 'afirmativo',
+    'eso es', 'exacto', 'positivo', '👍', '✅'
+  ]
+  return afirmaciones.includes(limpio) || /^(si|ok|listo|correcto|confirmo)\b/i.test(limpio)
+}
+
+function esNegacionSimple(limpio: string): boolean {
+  const frases = [
+    'no', 'noo', 'nop', 'no senor', 'incorrecto', 'asi no', 'esta mal',
+    'negativo', 'eso no fue', 'mal', 'equivocado', 'no es asi', 'no gracias',
+    'ya todo bien', 'asi dejelo', 'no deje asi', 'ninguno', 'nada mas'
+  ]
+  return frases.some(f => limpio === f || limpio.startsWith(f + ' '))
+}
+
+function esDespedidaOCortesia(limpio: string): boolean {
+  const palabras = [
+    'feliz noche', 'buenas noches', 'buena noche', 'hasta manana', 'hasta luego',
+    'que descanse', 'descanse', 'bendiciones', 'amen', 'chao', 'gracias feliz noche',
+    'muchas gracias', 'gracias a usted', 'listo gracias', 'vale gracias', 'todo bien',
+    'ya todo bien', 'no senor gracias', 'no gracias ya todo bien', 'no gracias'
+  ]
+  return palabras.some(p => limpio.includes(p)) || /^(gracias|muchas gracias|vale|ok gracias|chao|amen|bendiciones)$/i.test(limpio)
+}
+
+function esSaludoSimple(limpio: string): boolean {
+  const saludos = [
+    'hola', 'buen dia', 'buenos dias', 'buenas tardes', 'buenas',
+    'q tal', 'que tal', 'como estan', 'como esta', 'como vamos'
+  ]
+  return saludos.includes(limpio)
+}
+
 async function analizarConGemini(
   mensaje: string,
   operador: string,
@@ -306,48 +372,42 @@ async function analizarConGemini(
   memoria: CanastaReporte
 ) {
   if (!GEMINI_API_KEY) {
-    console.warn('GEMINI_API_KEY no configurada. Usando fallback básico.')
+    console.warn('⚠️ GEMINI_API_KEY no configurada en Vercel')
     return {
-      categoria: 'reporte_avance',
+      categoria: 'desconocido',
       falta_dato: null,
       mensaje_al_operador: '',
-      datos_extraidos: { tipo: 'estudio_suelo', metros: 0 }
+      datos_extraidos: null
     }
   }
 
   const prompt = `
 Eres el analista de operaciones de "JHF Perforaciones S.A.S." en Colombia.
-Tu trabajo es interpretar los mensajes de WhatsApp de los perforadores y operarios de campo en obras de geotecnia, sondeos y pilotaje.
+Tu labor es interpretar los mensajes de WhatsApp enviados por perforadores y operarios de campo en obras de geotecnia, sondeos y pilotaje.
 
-Contexto actual:
+Contexto:
 - Operador: "${operador}"
 - Frente de obra: "${frente}"
-- Estado conversación: "${estado}"
-- Datos previos en memoria: ${JSON.stringify(memoria)}
-- Mensaje nuevo del operador: "${mensaje}"
+- Estado: "${estado}"
+- Memoria previa: ${JSON.stringify(memoria)}
+- Mensaje nuevo: "${mensaje}"
 
-Debes clasificar el mensaje en una de las siguientes categorías exactas:
-1. "confirmacion_positiva": Si dice sí, correcto, ok, listo, guardelo, dale, de una, confirmo.
-2. "confirmacion_negativa": Si dice no, asi no fue, esta mal, corrijame, no gracias.
-3. "despedida_cortesia": Si dice gracias, feliz noche, bendiciones, hasta mañana, que descanse, amen.
-4. "broma_o_sin_sentido": Si dice vulgaridades, chistes o comentarios irrelevantes sin relación a la obra.
-5. "saludo_o_duda": Si solo dice hola, buenas tardes, que hay que hacer.
-6. "reiniciar": Si pide cancelar, anular, reiniciar, empezar de nuevo.
-7. "reporte_avance": Si reporta metros, sondeos, pilotes, tramos, ensayos SPT, shelby, recobros.
-8. "novedad_operativa": Si reporta lluvia, varada de máquina, trasteo, armado, cambio de punto, falta de ACPM, paro de SST/interventoría.
+Clasifica el mensaje en UNA de estas categorías:
+1. "broma_o_sin_sentido": Vulgaridades, groserías, chistes o temas personales ajenos a la obra (ej: "me jale el ganzo", "me rasqué...", sexo, fiesta).
+2. "novedad_operativa": Lluvia, varada mecánica, falta de combustible, trasteo, armado de equipo, paralización por SST o interventoría.
+3. "reporte_avance": Avances reales en metros, sondeos, pilotes, SPT, muestras Shelby o recobros.
+4. "desconocido": Cualquier texto que no aporte información técnica verificable.
 
-Reglas técnicas:
-- Geotecnia: Sondeos se normalizan como S-01, S-02. Cuchara partida = SPT. Tubo shelby = shelby.
-- Pilotes: "prehueco" = preperforación PQ (metros en pq). "ensanche" = ensanche. "camisa/casing" = encamisado. Pilotes se normalizan P-01, P-02.
-- Tramos: "de 2 a 5 metros" significa metros = 3 (tramo_inicio: 2, tramo_fin: 5).
-- Si es una broma, genera una respuesta profesional pero cordial pidiendo el avance real en "mensaje_al_operador".
-- Si faltan metros o el identificador del punto en un reporte técnico, indica "falta_dato": "metros" o "sondeo" o "pilote", y redacta en "mensaje_al_operador" la pregunta amable correspondiente.
+Reglas de extracción:
+- Sondeos: S-01, S-02, etc.
+- Pilotes: P-01, P-02, etc. Prehueco = preperforación PQ (metros en pq).
+- Si es una broma, escribe en "mensaje_al_operador" una respuesta profesional con humor que le pida el avance real de la obra.
 
-Responde ÚNICAMENTE en JSON con la siguiente estructura:
+Responde ÚNICAMENTE en JSON:
 {
-  "categoria": "confirmacion_positiva" | "confirmacion_negativa" | "despedida_cortesia" | "broma_o_sin_sentido" | "saludo_o_duda" | "reiniciar" | "reporte_avance" | "novedad_operativa",
+  "categoria": "broma_o_sin_sentido" | "novedad_operativa" | "reporte_avance" | "desconocido",
   "falta_dato": null | "metros" | "sondeo" | "pilote",
-  "mensaje_al_operador": "Texto de respuesta si es saludo, broma o pregunta por dato faltante",
+  "mensaje_al_operador": "Texto de respuesta si es broma o falta dato",
   "datos_extraidos": {
     "tipo": "estudio_suelo" | "pilote" | "standby" | "logistica",
     "sondeo": string | null,
@@ -375,21 +435,22 @@ Responde ÚNICAMENTE en JSON con la siguiente estructura:
       })
     })
 
+    if (!res.ok) {
+      const errText = await res.text()
+      console.error(`❌ Error en respuesta de Gemini API (${res.status}):`, errText)
+      return { categoria: 'desconocido', falta_dato: null, mensaje_al_operador: '', datos_extraidos: null }
+    }
+
     const data = await res.json()
     const rawJson = data.candidates?.[0]?.content?.parts?.[0]?.text
     if (rawJson) {
       return JSON.parse(rawJson)
     }
   } catch (err) {
-    console.error('Fallo en llamada a Gemini:', err)
+    console.error('Fallo en fetch a Gemini:', err)
   }
 
-  return {
-    categoria: 'reporte_avance',
-    falta_dato: null,
-    mensaje_al_operador: '',
-    datos_extraidos: { tipo: 'estudio_suelo', metros: 0 }
-  }
+  return { categoria: 'desconocido', falta_dato: null, mensaje_al_operador: '', datos_extraidos: null }
 }
 
 async function enviarWhatsApp(to: string, text: string) {
