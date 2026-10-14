@@ -134,10 +134,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'image_received' })
     }
 
-    // 2. PROCESAMIENTO DE MENSAJES DE TEXTO
+    // 2. CONVERSACIÓN CON LA IA (GEMINI)
     if (message.type === 'text') {
-      // Manejo de corrección explícita
-      if (textoLimpio === 'corregir' || textoLimpio === 'cambiar' || textoLimpio === 'modificar') {
+      // Si quiere corregir o reiniciar
+      if (/\b(corregir|cambiar|modificar|reiniciar|empezar de nuevo)\b/i.test(textoLimpio)) {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'esperando_reporte',
           borrador_reporte: { datos: {}, historial: [] }
@@ -145,66 +145,24 @@ export async function POST(req: Request) {
 
         await enviarWhatsApp(
           from,
-          `🔄 Listo Don ${nombreOperador}, dígame qué modificamos del reporte de hoy (metros, novedades o pilote/sondeo) y se lo actualizo de una.`
+          `🔄 Listo Don ${nombreOperador}, dígame qué modificamos del reporte de hoy y se lo actualizo con gusto.`
         )
-        return NextResponse.json({ status: 'ready_to_correct' })
+        return NextResponse.json({ status: 'reset_flow' })
       }
 
-      // Si el reporte ya estaba cerrado y saluda o se despide
-      if (estadoActual === 'inactivo') {
-        if (esDespedidaOInterjeccion(textoLimpio)) {
-          await enviarWhatsApp(
-            from,
-            `🙏 ¡Con todo el gusto Don ${nombreOperador}! Buen descanso y que pase feliz noche.`
-          )
-          return NextResponse.json({ status: 'closed_turn_courtesy' })
-        }
-
-        const quiereReportar = /\b(reiniciar|corregir|cambiar|nuevo reporte|reportar|modificar|otro reporte|mentiras|espera|fueron|hicimos|avance|varado|barado)\b/i.test(textoLimpio) ||
-                               /\b(\d+|un|uno|dos|tres|cuatro|cinco)\s*(?:m|mt|metros|pq|prehueco|sondeo|pilote)\b/i.test(textoLimpio)
-
-        if (!quiereReportar) {
-          await enviarWhatsApp(
-            from,
-            `👍 Don ${nombreOperador}, su reporte de hoy ya quedó debidamente guardado en la bitácora de JHF Perforaciones. ¡Que descanse!\n\n*(Si necesita corregir o cambiar algún dato, escriba "corregir")*`
-          )
-          return NextResponse.json({ status: 'already_saved_acknowledged' })
-        }
-
-        memoria.datos = {}
-        memoria.historial = []
-      }
-
-      if (/\b(cancelar|anular|borrar|reiniciar|empezar de nuevo)\b/i.test(textoLimpio)) {
-        await supabase.from('trabajadores').update({
-          estado_conversacion: 'esperando_reporte',
-          borrador_reporte: { datos: {}, historial: [] }
-        }).eq('id', trabajador.id)
-
-        await enviarWhatsApp(from, `🔄 Listo Don ${nombreOperador}, borramos lo anterior y empezamos de cero. Cuéntame cómo les fue hoy en *${frenteNombre}*.`)
-        return NextResponse.json({ status: 'reset' })
-      }
-
-      // Guardar si confirma
-      if (estadoActual === 'esperando_confirmacion' && esConfirmacion(textoLimpio)) {
-        const d = memoria.datos || {}
-        await guardarOActualizarReporte(trabajador, d, textoCrudo)
-
-        await supabase.from('trabajadores').update({
-          estado_conversacion: 'inactivo',
-          borrador_reporte: null
-        }).eq('id', trabajador.id)
-
+      // Si el turno ya estaba cerrado y saluda o se despide
+      if (estadoActual === 'inactivo' && esDespedidaOInterjeccion(textoLimpio)) {
         await enviarWhatsApp(
           from,
-          `✅ *¡Listo Don ${nombreOperador}! Su reporte quedó guardado exitosamente en la bitácora de JHF Perforaciones.*\n\nMuchas gracias por su compromiso de hoy, ¡que tenga un excelente descanso!`
+          `🙏 ¡Con todo el gusto Don ${nombreOperador}! Buen descanso y que pase feliz noche.`
         )
-        return NextResponse.json({ status: 'saved_direct' })
+        return NextResponse.json({ status: 'closed_courtesy' })
       }
 
       const nuevoItem: MensajeHistorial = { role: 'user', text: textoCrudo }
-      const historialActualizado: MensajeHistorial[] = [...(memoria.historial || []), nuevoItem].slice(-6)
+      const historialActualizado: MensajeHistorial[] = [...(memoria.historial || []), nuevoItem].slice(-8)
 
+      // Dejamos que Gemini entienda, razone y conduzca la entrevista
       const decisionIA = await consultarGeminiInteligente(
         textoCrudo,
         nombreOperador,
@@ -213,6 +171,9 @@ export async function POST(req: Request) {
         historialActualizado
       )
 
+      console.log('🤖 Decisión de Gemini:', JSON.stringify(decisionIA, null, 2))
+
+      // Guardar el reporte cuando esté confirmado
       if (decisionIA.accion === 'guardar_reporte') {
         const d = { ...(memoria.datos || {}), ...decisionIA.datos_actualizados }
         await guardarOActualizarReporte(trabajador, d, textoCrudo)
@@ -226,12 +187,13 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'saved_by_ai' })
       }
 
+      // Continuar la entrevista o pedir confirmación
       const respuestaItem: MensajeHistorial = { role: 'model', text: decisionIA.respuesta_whatsapp }
       historialActualizado.push(respuestaItem)
 
       const nuevaMemoria: MemoriaConversacion = {
         datos: { ...(memoria.datos || {}), ...decisionIA.datos_actualizados },
-        historial: historialActualizado.slice(-6)
+        historial: historialActualizado.slice(-8)
       }
 
       await supabase.from('trabajadores').update({
@@ -240,7 +202,7 @@ export async function POST(req: Request) {
       }).eq('id', trabajador.id)
 
       await enviarWhatsApp(from, decisionIA.respuesta_whatsapp)
-      return NextResponse.json({ status: 'replied_smart' })
+      return NextResponse.json({ status: 'conversation_continued' })
     }
 
     return NextResponse.json({ status: 'ok' })
@@ -262,12 +224,16 @@ async function guardarOActualizarReporte(trabajador: any, d: DatosReporte, texto
     .order('created_at', { ascending: false })
     .limit(1)
 
+  const tipoFinal: TipoOperacion =
+    d.tipo ||
+    (d.metros === 0 && d.observaciones ? 'standby' : d.pilote || d.pq || d.ensanche ? 'pilote' : 'estudio_suelo')
+
   const payload = {
     trabajador_id: trabajador.id,
     proyecto_id: trabajador.proyecto_id,
     trabajador_nombre: trabajador.nombre,
     proyecto_nombre: trabajador.proyectos?.nombre || 'General',
-    tipo_operacion: d.tipo || (d.pilote || d.pq || d.ensanche ? 'pilote' : 'estudio_suelo'),
+    tipo_operacion: tipoFinal,
     sondeo: d.sondeo || null,
     pilote: d.pilote || null,
     metros_nq: d.metros || 0,
@@ -295,32 +261,48 @@ async function consultarGeminiInteligente(
   datosPrevios: DatosReporte,
   historial: MensajeHistorial[]
 ): Promise<{ accion: string; respuesta_whatsapp: string; datos_actualizados: DatosReporte }> {
-  const modelos = ['gemini-flash-latest', 'gemini-1.5-flash', 'gemini-2.5-flash']
+  // Modelos estables de Google
+  const modelos = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest']
 
   const prompt = `
-Eres el Asistente de Operaciones de "JHF Perforaciones S.A.S." en Colombia.
-Hablas con "Don ${operador}" en el frente "${frente}". 
-Tono: humano, cercano, respetuoso de obra ("Don ${operador}", "mano", "listo", "hágale").
+Eres el Asistente de Operaciones de campo de "JHF Perforaciones S.A.S." en Colombia.
+Estás hablando por WhatsApp con "Don ${operador}" en el frente "${frente}".
+Tu tono debe ser humano, respetuoso, empático y propio del ambiente de obra en Colombia ("Don ${operador}", "mano", "listo", "hágale", "cuénteme").
 
-JERGA Y SITUACIONES DE OBRA:
-1. VARADAS Y PAROS: Si dicen que estuvieron varados ("barado", "varado", "se reventó la correa/polea", "daño mecánico", "paró SST", "llovió"):
-   - Si no avanzaron o dicen "ninguno", "cero", "nada": avance metros = 0, pq = 0, tipo = "standby".
-   - Registra en observaciones la razón de la varada (ej: "Varado por polea y correa reventada, sin avance").
-   - Pide confirmación de una vez: "¿Le parece bien dejar anotada la varada de la polea y correa con 0 metros en bitácora? Responda SÍ para confirmar."
-2. BROMAS Y VULGARIDADES: Si dicen bromas pesadas o groserías de confianza ("marica", "carechimba", "mariconsuelo", chistes de doble sentido), no te ofendas ni los sermonees; respóndeles con buen humor y camaradería de obra y llévalos a los datos reales.
-3. PREHUECO / PQ: es operación de pilote.
-4. SONDEO: es estudio de suelo.
-5. CONFIRMACIÓN: Si confirman ("si", "ok", "listo", "de una", "dejemos asi"), accion: "guardar_reporte".
+TU ROL PRINCIPAL:
+Eres un entrevistador operativo ágil. Tu objetivo es entender lo que te cuenta el operador y asegurarte de reunir toda la información necesaria para el informe diario sin complicarle la vida.
 
-DATOS PREVIOS RECOLECTADOS: ${JSON.stringify(datosPrevios)}
-HISTORIAL DE CHAT:
+INFORMACIÓN TÉCNICA QUE DEBE TENER EL REPORTE:
+1. Actividad / Frente: ¿En qué trabajaron? (Sondeo / Estudio de suelo, Pilotaje / Prehueco PQ / Ensanche, o Standby / Varada mecánica / Lluvia / Paro de SST).
+2. Punto o Elemento: ¿Cuál sondeo (ej: S-01) o pilote (ej: P-01)? Si el operador no sabe el número o dice que le toca preguntar, pon "P-01 (Por verificar)" o "S-01 (Por verificar)" sin discutir.
+3. Avance en Metros: Metros lineales perforados. Si estuvieron varados o parados todo el turno, el avance es 0.0 metros.
+4. Novedades / Observaciones: Motivo de varada (correas, poleas, bombas, combustible), clima, temas de SST, etc.
+
+CÓMO CONDUCIR LA CONVERSACIÓN:
+- Escucha con atención: Si el operador hace bromas, se desahoga o usa jerga de obra pesada ("carechimba", "mariconsuelo", chistes de doble sentido), tómalo con buen humor y camaradería, y con respeto condúcelo a la información técnica.
+- Pregunta lo que falte:
+  * Si te dice que estuvo varado por una polea o correa, respóndele con empatía ("¡Qué vaina Don ${operador}!") y pregúntale si alcanzaron a avanzar algo antes del daño o si quedaron en 0 metros.
+  * Si te dice los metros pero no qué estaban haciendo o en qué punto, pregúntaselo con naturalidad.
+- Resumen y Confirmación:
+  * Cuando ya tengas la información completa (actividad, punto, metros y novedades) O cuando el operador te diga que no hay más datos:
+    Hazle un resumen claro y cordial de la jornada y pregúntale si está todo correcto para guardarlo en bitácora (acción: "pedir_confirmacion").
+- Guardar el reporte:
+  * Si el operador responde confirmando ("sí", "listo", "de una", "dejemos así", "correcto", "dale", "ok"):
+    Agradécele cordialmente, deséale un buen descanso y marca acción: "guardar_reporte".
+
+DATOS PREVIOS RECOLECTADOS HASTA AHORA:
+${JSON.stringify(datosPrevios)}
+
+HISTORIAL DE LA CONVERSACIÓN:
 ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
-ÚLTIMO MENSAJE: "${mensaje}"
 
-Devuelve ÚNICAMENTE un JSON:
+ÚLTIMO MENSAJE DEL OPERADOR:
+"${mensaje}"
+
+Responde ÚNICAMENTE un JSON válido con esta estructura:
 {
   "accion": "conversar" | "pedir_confirmacion" | "guardar_reporte",
-  "respuesta_whatsapp": "Texto para WhatsApp",
+  "respuesta_whatsapp": "El mensaje que le enviarás al operador por WhatsApp",
   "datos_actualizados": {
     "tipo": "estudio_suelo" | "pilote" | "standby" | "logistica",
     "sondeo": string | null,
@@ -328,12 +310,14 @@ Devuelve ÚNICAMENTE un JSON:
     "metros": number | null,
     "pq": number | null,
     "ensanche": number | null,
+    "encamisado": number | null,
     "ensayos_spt": number | null,
     "observaciones": string | null
   }
 }
 `
 
+  // Umbral seguro para que Gemini no lance error 400 pero tolere jerga de obra
   const safetySettings = [
     { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
     { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
@@ -342,7 +326,11 @@ Devuelve ÚNICAMENTE un JSON:
   ]
 
   for (const modelo of modelos) {
-    if (!GEMINI_API_KEY) break
+    if (!GEMINI_API_KEY) {
+      console.error('❌ Falta GEMINI_API_KEY en las variables de entorno')
+      break
+    }
+
     try {
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${GEMINI_API_KEY}`, {
         method: 'POST',
@@ -367,93 +355,24 @@ Devuelve ÚNICAMENTE un JSON:
           }
         }
       } else {
-        const errText = await res.text()
-        console.warn(`⚠️ Gemini API ${modelo} respondió status ${res.status}:`, errText)
+        const errBody = await res.text()
+        console.warn(`⚠️ Modelo ${modelo} falló con status ${res.status}:`, errBody)
       }
     } catch (e: any) {
-      console.warn(`Error llamando a ${modelo}:`, e.message)
+      console.warn(`⚠️ Excepción llamando a ${modelo}:`, e.message)
     }
   }
 
-  return respaldoContextualInteligente(mensaje, operador, frente, datosPrevios)
-}
-
-function respaldoContextualInteligente(
-  raw: string,
-  operador: string,
-  frente: string,
-  previo: DatosReporte
-): { accion: string; respuesta_whatsapp: string; datos_actualizados: DatosReporte } {
-  const t = normalizarTexto(raw)
-
-  if (esConfirmacion(t)) {
-    return {
-      accion: 'guardar_reporte',
-      respuesta_whatsapp: `✅ *¡Listo Don ${operador}! Su reporte quedó guardado en la bitácora de JHF Perforaciones.*\n\n¡Que descanse mano!`,
-      datos_actualizados: { ...previo }
-    }
-  }
-
-  // 1. Detección de VARADAS, DAÑOS MECÁNICOS O CERO METROS
-  const esVarada = /\b(varad|barad|polea|correa|dano|daniad|danad|revent|frenad|parados|mantenimiento|ningun|nada|cero|no avanz|no pud|no hic)\b/i.test(t)
-  if (esVarada) {
-    return {
-      accion: 'pedir_confirmacion',
-      respuesta_whatsapp:
-        `¡Qué vaina Don ${operador}! Entendido el tema mecánico con la polea y correa mano. Le anotamos 0 metros de avance y la novedad de la varada para la bitácora.\n\n` +
-        `¿Le parece bien para dejarlo guardado? Responda *SÍ* para confirmar.`,
-      datos_actualizados: {
-        tipo: 'standby',
-        sondeo: previo.sondeo || null,
-        pilote: previo.pilote || null,
-        metros: 0,
-        pq: 0,
-        observaciones: `Varado: ${raw}`
-      }
-    }
-  }
-
-  // 2. Detección de metros numéricos
-  const matchNum = raw.match(/(\d+(?:[.,]\d+)?)/)
-  const numero = matchNum ? parseFloat(matchNum[1].replace(',', '.')) : null
-
-  const esPilote = previo.tipo === 'pilote' || /\b(pilote|pilotaje|pq|prehueco|pre hueco)\b/i.test(t)
-  const punto = esPilote ? (previo.pilote || 'P-01 (Por verificar)') : (previo.sondeo || 'S-01')
-
-  if (numero !== null && numero > 0 && numero < 150) {
-    const pq = esPilote ? numero : 0
-    const metros = !esPilote ? numero : 0
-    return {
-      accion: 'pedir_confirmacion',
-      respuesta_whatsapp:
-        `¡Copiado Don ${operador}! Anotamos *${numero} m* en *${punto}* para hoy en${frente}.\n\n` +
-        `¿Está todo correcto? Responda *SÍ* para guardar en bitácora.`,
-      datos_actualizados: {
-        tipo: esPilote ? 'pilote' : 'estudio_suelo',
-        pilote: esPilote ? punto : null,
-        sondeo: !esPilote ? punto : null,
-        pq,
-        metros,
-        observaciones: raw
-      }
-    }
-  }
-
+  // Respaldo de cortesía únicamente en caso extremo de desconexión de Google
   return {
     accion: 'conversar',
-    respuesta_whatsapp:
-      `¡Buenas Don ${operador}! Cuénteme con calma mano: ¿cuántos metros perforaron hoy en ${frente} o qué novedad tuvieron en el turno?`,
-    datos_actualizados: { ...previo }
+    respuesta_whatsapp: `Don ${operador}, qué pena que se me entrecortó la señal mano. ¿Me repite porfa lo último que me dijo sobre cómo les fue hoy?`,
+    datos_actualizados: { ...datosPrevios }
   }
 }
 
 function normalizarTexto(t: string): string {
   return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim()
-}
-
-function esConfirmacion(limpio: string): boolean {
-  return /^(si|sii|siii|sip|ok|okay|listo|correcto|confirmo|confirmado|de una|dale|asi es|mm si|si senor|dejemos asi|asi dejamos)$/i.test(limpio) ||
-         /^si\b/i.test(limpio)
 }
 
 function esDespedidaOInterjeccion(limpio: string): boolean {
@@ -462,7 +381,7 @@ function esDespedidaOInterjeccion(limpio: string): boolean {
     'hasta manana', 'bendiciones', 'que descanse', 'uuy', 'uy', 'epa', 'listo gracias',
     'vale gracias', 'todo bien', 'chao', 'amen', 'nos vemos', '👍', '🙏', 'gracias mano'
   ]
-  return palabras.includes(limpio) || /^(gracias|ok gracias|chao|feliz noche|buenas noches|uuy|uy)$/i.test(limpio)
+  return palabras.includes(limpio)
 }
 
 async function enviarWhatsApp(to: string, text: string) {
@@ -493,7 +412,7 @@ async function enviarWhatsApp(to: string, text: string) {
       const errText = await res.text()
       console.error(`❌ Meta API rechazó el mensaje (${res.status}):`, errText)
     } else {
-      console.log(`✅ ¡Mensaje entregado a WhatsApp con éxito para: ${to}!`)
+      console.log(`✅ Mensaje entregado a WhatsApp con éxito para: ${to}`)
     }
   } catch (err: any) {
     console.error('❌ Excepción de red enviando a Meta Graph API:', err.message)
