@@ -40,6 +40,9 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const body = await req.json()
+    if (body.entry?.[0]?.changes?.[0]?.value?.statuses) {
+      console.log('📢 ESTADO ENTREGA META:', JSON.stringify(body.entry[0].changes[0].value.statuses, null, 2))
+    }
     const entry = body.entry?.[0]
     const changes = entry?.changes?.[0]
     const value = changes?.value
