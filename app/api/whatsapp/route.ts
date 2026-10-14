@@ -6,26 +6,6 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || ''
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_ID || ''
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ''
 
-interface CanastaReporte {
-  tipo?: 'estudio_suelo' | 'pilote' | 'standby' | 'logistica'
-  sondeo?: string | null
-  pilote?: string | null
-  metros?: number | null
-  tramo_inicio?: number | null
-  tramo_fin?: number | null
-  cota_actual?: number | null
-  recobro?: string | null
-  ensayos_spt?: number | null
-  muestras_shelby?: number | null
-  pq?: number | null
-  ensanche?: number | null
-  encamisado?: number | null
-  detalle?: string
-  motivo_varada?: string
-  resumen?: string
-  ya_pregunto?: boolean
-}
-
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
   const mode = searchParams.get('hub.mode')
@@ -41,11 +21,6 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const body = await req.json()
-
-    if (body.entry?.[0]?.changes?.[0]?.value?.statuses) {
-      console.log('📢 ESTADO ENTREGA META:', JSON.stringify(body.entry[0].changes[0].value.statuses, null, 2))
-    }
-
     const entry = body.entry?.[0]
     const changes = entry?.changes?.[0]
     const value = changes?.value
@@ -68,34 +43,36 @@ export async function POST(req: Request) {
     if (!trabajador) {
       await enviarWhatsApp(
         from,
-        '⚠️ Este número no se encuentra registrado como personal operativo activo en el sistema de JHF Perforaciones.'
+        '⚠️ Este número no se encuentra registrado como personal operativo activo en JHF Perforaciones.'
       )
       return NextResponse.json({ status: 'unregistered_user' })
     }
 
-    // CLIC EN BOTÓN DE PLANTILLA
-    if (message.type === 'button' || message.type === 'interactive') {
-      const nombreOperador = trabajador.nombre
-      const frenteNombre = trabajador.proyectos?.nombre || 'General'
+    const nombreOperador = trabajador.nombre
+    const frenteNombre = trabajador.proyectos?.nombre || 'General'
+    const memoriaPrevia = trabajador.borrador_reporte || {}
+    const estadoActual = trabajador.estado_conversacion || 'inactivo'
 
+    // CLIC EN EL BOTÓN DE LA PLANTILLA
+    if (message.type === 'button' || message.type === 'interactive') {
       await supabase.from('trabajadores').update({
-        estado_conversacion: 'esperando_reporte_diario',
+        estado_conversacion: 'esperando_reporte',
         borrador_reporte: null
       }).eq('id', trabajador.id)
 
       await enviarWhatsApp(
         from,
-        `👋 ¡Hola ${nombreOperador}! Te saluda el Sistema de Control Operativo de *JHF Perforaciones S.A.S.*\n\n` +
+        `👋 ¡Hola ${nombreOperador}! Te saluda el Asistente Operativo de *JHF Perforaciones S.A.S.*\n\n` +
         `¿Cómo les fue hoy en *${frenteNombre}*?\n\n` +
-        `Por favor cuéntame en qué punto trabajaron (sondeo o pilote), cuántos metros avanzaron o si tuvieron alguna novedad (lluvia, trasteo o varada).`
+        `Cuéntame en un mensaje si avanzaron en metros (sondeo o pilote) o si tuvieron novedades (lluvia, trasteo, SST o varada).`
       )
-      return NextResponse.json({ status: 'button_welcome_sent' })
+      return NextResponse.json({ status: 'welcome_sent' })
     }
 
     if (message.type === 'audio' || message.type === 'voice') {
       await enviarWhatsApp(
         from,
-        `👋 Hola ${trabajador.nombre}, este sistema automatizado no escucha audios. Por favor escríbeme en un texto corto cómo les fue hoy.`
+        `👋 Don ${nombreOperador}, por ahora no puedo procesar notas de voz. Escríbame porfa en un mensaje corto cómo les fue hoy.`
       )
       return NextResponse.json({ status: 'audio_rejected' })
     }
@@ -103,51 +80,44 @@ export async function POST(req: Request) {
     if (message.type === 'image') {
       await enviarWhatsApp(
         from,
-        `📷 ¡Foto recibida, ${trabajador.nombre}! Si aún no has escrito los datos del avance de hoy, envíamelos en texto para cerrar tu reporte.`
+        `📷 ¡Foto recibida, ${nombreOperador}! Queda anexada al reporte del día.`
       )
       return NextResponse.json({ status: 'image_received' })
     }
 
     if (message.type === 'text') {
-      const textoCrudo = message.text?.body?.trim() || ''
-      const textoNormalizado = normalizarTexto(textoCrudo)
-      const estadoActual = trabajador.estado_conversacion || 'inactivo'
-      const canastaPrevia: CanastaReporte = trabajador.borrador_reporte || {}
-      const nombreOperador = trabajador.nombre
-      const frenteNombre = trabajador.proyectos?.nombre || 'General'
+      const textoMensaje = message.text?.body?.trim() || ''
+      const textoLimpio = normalizarTexto(textoMensaje)
 
-      // 1. REINICIAR / CANCELAR
-      if (/\b(cancelar|anular|borrar|reiniciar|empezar de nuevo|borre eso)\b/i.test(textoNormalizado)) {
+      // 1. REINICIAR DIRECTO
+      if (/\b(cancelar|anular|borrar|reiniciar|empezar de nuevo)\b/i.test(textoLimpio)) {
         await supabase.from('trabajadores').update({
-          estado_conversacion: 'esperando_reporte_diario',
+          estado_conversacion: 'esperando_reporte',
           borrador_reporte: null
         }).eq('id', trabajador.id)
 
-        await enviarWhatsApp(
-          from,
-          `🔄 Listo ${nombreOperador}, empezamos de cero. Cuéntame cómo les fue hoy en *${frenteNombre}*.`
-        )
-        return NextResponse.json({ status: 'cancelled' })
+        await enviarWhatsApp(from, `🔄 Listo Don ${nombreOperador}, empezamos de cero. Cuéntame cómo les fue hoy en *${frenteNombre}*.`)
+        return NextResponse.json({ status: 'reset' })
       }
 
-      // 2. CONFIRMACIÓN POSITIVA ("SÍ", "OK", "CONFIRMO")
-      if (estadoActual === 'esperando_confirmacion' && esConfirmacionPositiva(textoNormalizado)) {
-        const b = canastaPrevia
+      // 2. CONFIRMACIÓN DIRECTA CON "SÍ"
+      if (estadoActual === 'esperando_confirmacion' && esConfirmacion(textoLimpio)) {
+        const d = memoriaPrevia
 
         await supabase.from('reportes_operativos').insert({
           trabajador_id: trabajador.id,
           proyecto_id: trabajador.proyecto_id,
           trabajador_nombre: nombreOperador,
           proyecto_nombre: frenteNombre,
-          tipo_operacion: b.tipo || 'estudio_suelo',
-          sondeo: b.sondeo || null,
-          pilote: b.pilote || null,
-          metros_nq: b.metros || 0,
-          avance_pq: b.pq || 0,
-          ensanche: b.ensanche || 0,
-          encamisado: b.encamisado || 0,
-          ensayos_spt: b.ensayos_spt || 0,
-          observaciones: b.detalle || b.resumen || textoCrudo,
+          tipo_operacion: d.tipo || 'estudio_suelo',
+          sondeo: d.sondeo || null,
+          pilote: d.pilote || null,
+          metros_nq: d.metros || 0,
+          avance_pq: d.pq || 0,
+          ensanche: d.ensanche || 0,
+          encamisado: d.encamisado || 0,
+          ensayos_spt: d.ensayos_spt || 0,
+          observaciones: d.observaciones || d.detalle || textoMensaje,
           confirmado: true
         })
 
@@ -158,166 +128,66 @@ export async function POST(req: Request) {
 
         await enviarWhatsApp(
           from,
-          `✅ *¡Listo ${nombreOperador}! Tu reporte quedó guardado en la bitácora de JHF Perforaciones.*\n\nMuchas gracias por tu gestión de hoy, ¡buen descanso!`
+          `✅ *¡Listo Don ${nombreOperador}! Tu reporte quedó guardado en la bitácora de JHF Perforaciones.*\n\nMuchas gracias por tu labor de hoy, ¡buen descanso!`
         )
         return NextResponse.json({ status: 'saved' })
       }
 
-      // 3. CONFIRMACIÓN NEGATIVA
-      if (estadoActual === 'esperando_confirmacion' && esNegacionSimple(textoNormalizado)) {
-        await supabase.from('trabajadores').update({
-          estado_conversacion: 'esperando_reporte_diario',
-          borrador_reporte: null
-        }).eq('id', trabajador.id)
-
-        await enviarWhatsApp(
-          from,
-          `✍️ Entendido ${nombreOperador}, descartado. Escríbeme el reporte correcto para registrarlo.`
-        )
-        return NextResponse.json({ status: 'confirmation_rejected' })
-      }
-
-      // 4. DESPEDIDAS Y CORTESÍAS
-      if (esDespedidaOCortesia(textoNormalizado)) {
+      // 3. CORTESÍAS Y DESPEDIDAS
+      if (esDespedida(textoLimpio)) {
         if (estadoActual === 'esperando_confirmacion') {
           await supabase.from('trabajadores').update({
             estado_conversacion: 'inactivo',
             borrador_reporte: null
           }).eq('id', trabajador.id)
         }
-
-        await enviarWhatsApp(
-          from,
-          `🙏 ¡Con gusto ${nombreOperador}! Que descanses y tengas una excelente noche. Quedamos atentos para mañana.`
-        )
-        return NextResponse.json({ status: 'courtesy_replied' })
+        await enviarWhatsApp(from, `🙏 ¡Con gusto Don ${nombreOperador}! Que descanse y tenga una excelente noche.`)
+        return NextResponse.json({ status: 'courtesy' })
       }
 
-      // 5. BROMAS O VULGARIDADES (Si no vienen acompañadas de metros reales)
-      const tieneMetrosEnBruto = /\b(\d+|un|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s*(?:m|mt|mts|metro|pq|prehueco)/i.test(textoNormalizado)
-      if (esBromaOGroseria(textoNormalizado) && !tieneMetrosEnBruto) {
-        await enviarWhatsApp(
-          from,
-          `😅 Don ${nombreOperador}, déjese de bromas y hablemos de trabajo: ¿cuántos metros perforaron hoy en *${frenteNombre}* o qué novedades tuvieron?`
-        )
-        return NextResponse.json({ status: 'joke_filtered' })
+      // 4. CEREBRO IA CON CASCADA DE GEMINI
+      const decisionIA = await consultarGeminiCascada(textoMensaje, nombreOperador, frenteNombre, memoriaPrevia)
+
+      // Guardar si la IA determinó confirmación
+      if (decisionIA.accion === 'guardar_reporte' && estadoActual === 'esperando_confirmacion') {
+        const d = { ...memoriaPrevia, ...decisionIA.datos_actualizados }
+
+        await supabase.from('reportes_operativos').insert({
+          trabajador_id: trabajador.id,
+          proyecto_id: trabajador.proyecto_id,
+          trabajador_nombre: nombreOperador,
+          proyecto_nombre: frenteNombre,
+          tipo_operacion: d.tipo || 'estudio_suelo',
+          sondeo: d.sondeo || null,
+          pilote: d.pilote || null,
+          metros_nq: d.metros || 0,
+          avance_pq: d.pq || 0,
+          ensanche: d.ensanche || 0,
+          encamisado: d.encamisado || 0,
+          ensayos_spt: d.ensayos_spt || 0,
+          observaciones: d.observaciones || textoMensaje,
+          confirmado: true
+        })
+
+        await supabase.from('trabajadores').update({
+          estado_conversacion: 'inactivo',
+          borrador_reporte: null
+        }).eq('id', trabajador.id)
+
+        await enviarWhatsApp(from, decisionIA.respuesta_whatsapp)
+        return NextResponse.json({ status: 'saved_by_ai' })
       }
 
-      // 6. SALUDOS SIMPLES
-      if (esSaludoSimple(textoNormalizado)) {
-        if (estadoActual === 'inactivo') {
-          await enviarWhatsApp(
-            from,
-            `👋 Hola ${nombreOperador}, tu reporte de hoy ya está registrado en el sistema. Si deseas modificarlo, escribe *reiniciar*.`
-          )
-        } else {
-          await enviarWhatsApp(
-            from,
-            `👋 ¡Hola ${nombreOperador}! ¿Cómo les fue hoy en *${frenteNombre}*?\n\nCuéntame en qué punto trabajaron, cuántos metros avanzaron o qué actividades hicieron.`
-          )
-        }
-        return NextResponse.json({ status: 'greeting_replied' })
-      }
-
-      // ====================================================
-      // 7. EXTRACCIÓN HÍBRIDA (GEMINI IA + MOTOR LOCAL)
-      // ====================================================
-      let extraccion = await analizarConGemini(textoCrudo, nombreOperador, frenteNombre, canastaPrevia)
-
-      if (!extraccion || !extraccion.valido) {
-        extraccion = analizarMotorLocal(textoCrudo, canastaPrevia)
-      }
-
-      // Si el operario no sabe el número de punto, se le asigna P-01 o S-01
-      if (/no\s*(?:me\s*)?se\s*(?:el\s*)?(?:nombre|numero|nro|sondeo|pilote|punto)|me\s*tocaria\s*preguntar/i.test(textoNormalizado)) {
-        if (extraccion.tipo === 'pilote' || extraccion.pq || extraccion.ensanche) {
-          extraccion.pilote = extraccion.pilote || 'P-01'
-        } else {
-          extraccion.sondeo = extraccion.sondeo || 'S-01'
-        }
-      }
-
-      const tieneMetraje = (extraccion.metros !== null && extraccion.metros !== undefined && extraccion.metros > 0) ||
-                           (extraccion.pq !== null && extraccion.pq !== undefined && extraccion.pq > 0) ||
-                           (extraccion.ensanche !== null && extraccion.ensanche !== undefined && extraccion.ensanche > 0)
-      const tienePunto = Boolean(extraccion.sondeo || extraccion.pilote)
-      const esStandby = extraccion.tipo === 'standby' || extraccion.tipo === 'logistica'
-
-      if (!tieneMetraje && !tienePunto && !esStandby && !canastaPrevia.ya_pregunto) {
-        await enviarWhatsApp(
-          from,
-          `👋 Don ${nombreOperador}, no alcancé a captar los metros ni el punto de trabajo. Por favor indícame cuántos metros avanzaron hoy o qué novedad tuvieron en *${frenteNombre}*.`
-        )
-        return NextResponse.json({ status: 'unclear_message' })
-      }
-
-      // ====================================================
-      // 8. GENERAR FICHA RESUMEN Y SOLICITAR CONFIRMACIÓN
-      // ====================================================
-      const datosFinales: CanastaReporte = {
-        ...canastaPrevia,
-        ...extraccion,
-        detalle: canastaPrevia.detalle ? `${canastaPrevia.detalle} -${textoCrudo}` : textoCrudo
-      }
-
-      let resumen = ''
-      if (datosFinales.tipo === 'pilote' || datosFinales.pq || datosFinales.ensanche || datosFinales.pilote) {
-        datosFinales.tipo = 'pilote'
-        const piloteFinal = datosFinales.pilote || 'P-01'
-        const pqFinal = datosFinales.pq ?? datosFinales.metros ?? 0
-        const ensFinal = datosFinales.ensanche || 0
-        const encFinal = datosFinales.encamisado || 0
-
-        resumen =
-          `👷 *Operador:* ${nombreOperador}\n` +
-          `📍 *Frente:* ${frenteNombre}\n` +
-          `• *Actividad:* PILOTAJE\n` +
-          `• *Pilote:* ${piloteFinal}\n` +
-          `• *Preperforación (PQ):* ${pqFinal} m\n` +
-          `• *Ensanche:* ${ensFinal} m\n` +
-          `• *Encamisado:* ${encFinal} m\n` +
-          `• *Detalle / Novedad:* ${datosFinales.detalle}`
-      } else if (datosFinales.tipo === 'standby' || datosFinales.tipo === 'logistica') {
-        resumen =
-          `👷 *Operador:* ${nombreOperador}\n` +
-          `📍 *Frente:* ${frenteNombre}\n` +
-          `• *Actividad:* ${datosFinales.tipo === 'standby' ? 'NOVEDAD / STANDBY' : 'LOGÍSTICA DE CAMPO'}\n` +
-          `• *Detalle:* ${datosFinales.detalle}`
-      } else {
-        datosFinales.tipo = 'estudio_suelo'
-        const sondeoFinal = datosFinales.sondeo || 'S-01'
-        const metrosFinal = datosFinales.metros ?? 0
-        const tramo = (datosFinales.tramo_inicio !== null && datosFinales.tramo_inicio !== undefined && datosFinales.tramo_fin !== null && datosFinales.tramo_fin !== undefined)
-          ? ` (De ${datosFinales.tramo_inicio} m a${datosFinales.tramo_fin} m)`
-          : ''
-        const spt = datosFinales.ensayos_spt ? `\n• *Ensayos SPT:* ${datosFinales.ensayos_spt}` : ''
-        const shelby = datosFinales.muestras_shelby ? `\n• *Muestras Shelby:* ${datosFinales.muestras_shelby}` : ''
-        const rec = datosFinales.recobro ? `\n• *Recobro:* ${datosFinales.recobro}` : ''
-
-        resumen =
-          `👷 *Operador:* ${nombreOperador}\n` +
-          `📍 *Frente:* ${frenteNombre}\n` +
-          `• *Actividad:* ESTUDIO DE SUELOS / GEOTECNIA\n` +
-          `• *Sondeo / Punto:* ${sondeoFinal}\n` +
-          `• *Avance Perforado:* ${metrosFinal} m${tramo}${spt}${shelby}${rec}\n` +
-          `• *Observaciones:* ${datosFinales.detalle}`
-      }
-
-      datosFinales.resumen = resumen
+      // Actualizar estado y enviar respuesta
+      const memoriaActualizada = { ...memoriaPrevia, ...decisionIA.datos_actualizados }
 
       await supabase.from('trabajadores').update({
-        estado_conversacion: 'esperando_confirmacion',
-        borrador_reporte: datosFinales
+        estado_conversacion: decisionIA.accion === 'pedir_confirmacion' ? 'esperando_confirmacion' : 'conversando',
+        borrador_reporte: memoriaActualizada
       }).eq('id', trabajador.id)
 
-      await enviarWhatsApp(
-        from,
-        `📋 *Resumen de tu reporte:*\n\n${resumen}\n\n` +
-        `----------------------------\n` +
-        `📷 *Recuerda enviar foto de la planilla, caja de muestras o testigo.*\n\n` +
-        `¿Está todo correcto? Responde *SÍ* para guardar o escríbeme cualquier corrección.`
-      )
-      return NextResponse.json({ status: 'draft_ready' })
+      await enviarWhatsApp(from, decisionIA.respuesta_whatsapp)
+      return NextResponse.json({ status: 'replied' })
     }
 
     return NextResponse.json({ status: 'ok' })
@@ -327,185 +197,143 @@ export async function POST(req: Request) {
   }
 }
 
-// MOTOR LOCAL DE PARSEO TÉCNICO Y CONVERSIÓN DE TEXTO A DÍGITOS
-function analizarMotorLocal(raw: string, previo: CanastaReporte): any {
-  let t = normalizarTexto(raw)
-
-  // Conversión de números escritos en palabras a dígitos
-  const mapaNumeros: Record<string, string> = {
-    'cero': '0', 'un': '1', 'uno': '1', 'una': '1', 'dos': '2', 'dosss': '2', 'doss': '2',
-    'tres': '3', 'tress': '3', 'cuatro': '4', 'cinco': '5', 'seis': '6', 'siete': '7',
-    'ocho': '8', 'nueve': '9', 'diez': '10', 'once': '11', 'doce': '12', 'quince': '15',
-    'veinte': '20'
-  }
-  for (const [palabra, digito] of Object.entries(mapaNumeros)) {
-    t = t.replace(new RegExp(`\\b${palabra}\\b`, 'g'), digito)
-  }
-  t = t.replace(/\bmedio\s*(?:metro|m)\b/g, '0.5 metros')
-
-  const c: any = { ...previo, valido: false }
-
-  const mencionaPilote = /\b(pilote|pilotaje|pq|prehueco|pre hueco|ensanche|encamisado|casing)\b/i.test(t) || /\bp[-_\s]*0*\d+\b/i.test(t)
-  const mencionaLluvia = /\b(lluvia|llovio|aguacero|clima|agua paramos|inundado)\b/i.test(t)
-  const mencionaVarada = /\b(varad|dano|falla|revento|rompio|manguera|bomba|acpm|combustible|sst|interventoria|pararon|paro)\b/i.test(t)
-
-  if (mencionaPilote) c.tipo = 'pilote'
-  else if (mencionaLluvia || mencionaVarada) c.tipo = 'standby'
-  else c.tipo = c.tipo || 'estudio_suelo'
-
-  // Sondeos
-  const mSondeo = t.match(/\b(?:sondeo|punto|pozo|sp|s)[-_\s]*0*(\d+)\b/i)
-  if (mSondeo) { c.sondeo = `S-${mSondeo[1].padStart(2, '0')}`; c.tipo = 'estudio_suelo'; c.valido = true }
-
-  // Pilotes
-  const mPilote = t.match(/\b(?:pilote|p)[-_\s]*0*(\d+)\b/i)
-  if (mPilote) { c.pilote = `P-${mPilote[1].padStart(2, '0')}`; c.tipo = 'pilote'; c.valido = true }
-
-  // Tramos: "de 2 a 6 metros"
-  const mTramo = t.match(/(?:de|desde)\s*(\d+(?:\.\d+)?)\s*(?:a|hasta)\s*(\d+(?:\.\d+)?)/i)
-  if (mTramo) {
-    const ini = parseFloat(mTramo[1])
-    const fin = parseFloat(mTramo[2])
-    if (fin > ini) {
-      c.tramo_inicio = ini
-      c.tramo_fin = fin
-      c.metros = parseFloat((fin - ini).toFixed(2))
-      c.valido = true
-    }
-  }
-
-  // Prehueco / PQ
-  const mPQ = t.match(/(\d+(?:\.\d+)?)\s*(?:metros?\s*)?(?:en|de)?\s*(?:pq|prehueco|pre hueco)/i) ||
-              t.match(/(?:pq|prehueco|pre hueco)\s*(?:de)?\s*(\d+(?:\.\d+)?)/i)
-  if (mPQ) {
-    c.pq = parseFloat(mPQ[1])
-    c.tipo = 'pilote'
-    c.valido = true
-  }
-
-  // Metros sueltos o explícitos ("2 metros", "dos metros mano", "avance 3")
-  const mMetros = t.match(/(\d+(?:\.\d+)?)\s*(?:metros?|m\b)/i) ||
-                  t.match(/\b(?:hice|perfore|avanzamos|hicimos|hicieron|avance)\s*(\d+(?:\.\d+)?)/i)
-  if (mMetros && !c.metros && !c.pq) {
-    const val = parseFloat(mMetros[1])
-    if (c.tipo === 'pilote') c.pq = val
-    else c.metros = val
-    c.valido = true
-  }
-
-  // SPT y Shelby
-  const mSPT = t.match(/(\d+)\s*(?:ensayos?|muestras?)?\s*spt/i) || t.match(/\bspt\b/i)
-  if (mSPT) { c.ensayos_spt = mSPT[1] ? parseInt(mSPT[1]) : 1; c.valido = true }
-
-  if (mencionaLluvia || mencionaVarada) c.valido = true
-
-  return c
-}
-
-// LLAMADA A GEMINI CON ENDPOINT OFICIAL ESTABLE V1
-async function analizarConGemini(mensaje: string, operador: string, frente: string, memoria: CanastaReporte): Promise<any> {
-  if (!GEMINI_API_KEY) return { valido: false }
+// CASCADA DE GEMINI: gemini-flash-latest -> gemini-3.7-flash -> Motor local
+async function consultarGeminiCascada(
+  mensaje: string,
+  operador: string,
+  frente: string,
+  memoria: any
+): Promise<any> {
+  const modelos = ['gemini-flash-latest', 'gemini-3.7-flash', 'gemini-3.5-flash']
 
   const prompt = `
-Analiza el reporte de un perforador de "JHF Perforaciones S.A.S." en Colombia:
-Operador: "${operador}", Frente: "${frente}", Mensaje: "${mensaje}", Memoria previa: ${JSON.stringify(memoria)}.
+Eres el asistente virtual de operaciones de "JHF Perforaciones S.A.S." en Colombia.
+Hablas con perforadores y operarios de campo en obras geotécnicas y pilotaje.
+Tu tono es humano, profesional, respetuoso y cercano con jerga colombiana de obra ("Don ${operador}", "mano", "listo").
 
-Devuelve ÚNICAMENTE un JSON:
+Contexto:
+- Operador: "${operador}"
+- Frente de trabajo: "${frente}"
+- Memoria acumulada hoy: ${JSON.stringify(memoria)}
+- Mensaje nuevo del operador: "${mensaje}"
+
+Reglas clave:
+1. SI DICE BROMAS O TEMAS AJENOS (ej: "sexo", "o se maria la loca", etc.):
+   - No seas un robot frío. Responde con chispa y pídele con humor que te cuente en serio cuántos metros hicieron hoy en la obra.
+   - accion: "conversar".
+2. SI REPORTA AVANCE O NOVEDADES (ej: "dos metros mano en prehueco y nos paró sst", "hicimos 4 m en sondeo 1"):
+   - Convierte números en palabras ("dos" = 2).
+   - "prehueco" o "PQ" = avance pq (pilote). "SPT" = ensayos spt. "lluvia/varada/sst" = novedad.
+   - Si no sabe el número de punto, asígnale "P-01" o "S-01" provisional y no te trabes.
+   - Devuelve la ficha estructurada y dile: "¿Está todo correcto? Responde SÍ para guardar en bitácora".
+   - accion: "pedir_confirmacion".
+3. SI CONFIRMA (ej: "sí", "si", "ok", "listo", "de acuerdo"):
+   - accion: "guardar_reporte".
+4. SI DA LAS GRACIAS O SE DESPIDE:
+   - Deséale una feliz noche sin abrir reportes.
+   - accion: "conversar".
+
+Devuelve ÚNICAMENTE un JSON válido:
 {
-  "valido": true,
-  "tipo": "estudio_suelo" | "pilote" | "standby" | "logistica",
-  "sondeo": string | null,
-  "pilote": string | null,
-  "metros": number | null,
-  "tramo_inicio": number | null,
-  "tramo_fin": number | null,
-  "pq": number | null,
-  "ensanche": number | null,
-  "ensayos_spt": number | null,
-  "recobro": string | null
+  "accion": "conversar" | "pedir_confirmacion" | "guardar_reporte",
+  "respuesta_whatsapp": "Texto para WhatsApp",
+  "datos_actualizados": {
+    "tipo": "estudio_suelo" | "pilote" | "standby",
+    "sondeo": string | null,
+    "pilote": string | null,
+    "metros": number | null,
+    "pq": number | null,
+    "ensanche": number | null,
+    "ensayos_spt": number | null,
+    "observaciones": string | null
+  }
 }
-Si el mensaje no contiene datos de metros, avances ni novedades operativas de obra, devuelve {"valido": false}.
 `
 
-  try {
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 2500) // Máximo 2.5 seg
+  for (const modelo of modelos) {
+    if (!GEMINI_API_KEY) break
 
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.1 }
-      }),
-      signal: controller.signal
-    })
-    clearTimeout(timeoutId)
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${GEMINI_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
+        })
+      })
 
-    if (res.ok) {
-      const data = await res.json()
-      const rawJson = data.candidates?.[0]?.content?.parts?.[0]?.text
-      if (rawJson) return JSON.parse(rawJson)
+      if (res.ok) {
+        const data = await res.json()
+        const raw = data.candidates?.[0]?.content?.parts?.[0]?.text
+        if (raw) return JSON.parse(raw)
+      } else {
+        console.warn(`Modelo ${modelo} devolvió ${res.status}, probando siguiente modelo en cascada...`)
+      }
+    } catch (e: any) {
+      console.warn(`Fallo de conexión con ${modelo}:`, e.message)
     }
-  } catch (e) {
-    // Si Gemini tarda o falla, deriva silenciosamente al motor local
   }
 
-  return { valido: false }
+  // Respaldo de seguridad si Google llegase a fallar en todos los modelos
+  return respaldoLocal(mensaje, operador, frente, memoria)
+}
+
+function respaldoLocal(raw: string, operador: string, frente: string, memoria: any) {
+  let t = normalizarTexto(raw)
+  const palabrasNum: Record<string, string> = {
+    'cero': '0', 'un': '1', 'uno': '1', 'una': '1', 'dos': '2', 'dosss': '2', 'tres': '3', 'cuatro': '4', 'cinco': '5'
+  }
+  for (const [p, d] of Object.entries(palabrasNum)) {
+    t = t.replace(new RegExp(`\\b${p}\\b`, 'g'), d)
+  }
+
+  const esPilote = /\b(pilote|pilotaje|pq|prehueco|pre hueco)\b/i.test(t)
+  const mMetros = t.match(/(\d+(?:\.\d+)?)\s*(?:m|mt|mts|metros?|pq|prehueco)/i) || t.match(/\b(?:hice|perfore|avanzamos)\s*(\d+(?:\.\d+)?)/i)
+  const valorMetros = mMetros ? parseFloat(mMetros[1]) : (memoria.pq || memoria.metros || null)
+  const puntoDetectado = esPilote ? (memoria.pilote || 'P-01') : (memoria.sondeo || 'S-01')
+
+  if (valorMetros || /\b(sst|paro|lluvia|varad)\b/i.test(t)) {
+    const pq = esPilote ? valorMetros : 0
+    const metros = !esPilote ? valorMetros : 0
+    const obs = memoria.observaciones ? `${memoria.observaciones} -${raw}` : raw
+
+    const resumen =
+      `👷 *Operador:* ${operador}\n` +
+      `📍 *Frente:* ${frente}\n` +
+      `• *Actividad:* ${esPilote ? 'PILOTAJE' : 'ESTUDIO DE SUELOS'}\n` +
+      `• *${esPilote ? 'Pilote' : 'Sondeo'}:* ${puntoDetectado}\n` +
+      (esPilote ? `• *Preperforación (PQ):* ${pq || 0} m\n` : `• *Avance Perforado:* ${metros || 0} m\n`) +
+      `• *Novedades / Detalle:* ${obs}`
+
+    return {
+      accion: 'pedir_confirmacion',
+      respuesta_whatsapp:
+        `📋 *Resumen de tu reporte:*\n\n${resumen}\n\n` +
+        `----------------------------\n` +
+        `📷 *Recuerda enviar foto de soporte de la jornada.*\n\n` +
+        `¿Está todo correcto? Responde *SÍ* para guardar en bitácora.`,
+      datos_actualizados: { tipo: esPilote ? 'pilote' : 'estudio_suelo', pilote: esPilote ? puntoDetectado : null, sondeo: !esPilote ? puntoDetectado : null, pq, metros, observaciones: obs }
+    }
+  }
+
+  return {
+    accion: 'conversar',
+    respuesta_whatsapp: `👋 Don ${operador}, cuénteme: ¿cuántos metros perforaron hoy en *${frente}* o qué novedades tuvieron?`,
+    datos_actualizados: {}
+  }
 }
 
 function normalizarTexto(t: string): string {
-  return t
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '')
-    .trim()
+  return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim()
 }
 
-function esBromaOGroseria(limpio: string): boolean {
-  const palabras = [
-    'sexo', 'setso', 'ganzo', 'ganso', 'huevos', 'guevas', 'madre', 'chimba',
-    'verga', 'mierda', 'puta', 'gonorrea', 'culiar', 'chiste', 'marica', 'loca', 'loco'
-  ]
-  return palabras.some(p => limpio.includes(p))
+function esConfirmacion(limpio: string): boolean {
+  return /^(si|sii|siii|sip|ok|okay|listo|correcto|confirmo|confirmado|de una|dale|asi es)$/i.test(limpio)
 }
 
-function esConfirmacionPositiva(limpio: string): boolean {
-  const afirmaciones = [
-    'si', 'sii', 'siii', 'sip', 'si senor', 'correcto', 'ok', 'okay', 'listo',
-    'de acuerdo', 'confirmo', 'confirmado', 'guardar', 'asentar', 'dale',
-    'de una', 'asi es', 'esta bien', 'perfecto', 'bien', 'claro', 'afirmativo',
-    'eso es', 'exacto', 'positivo', '👍', '✅'
-  ]
-  return afirmaciones.includes(limpio) || /^(si|ok|listo|correcto|confirmo)\b/i.test(limpio)
-}
-
-function esNegacionSimple(limpio: string): boolean {
-  const frases = [
-    'no', 'noo', 'nop', 'no senor', 'incorrecto', 'asi no', 'esta mal',
-    'negativo', 'eso no fue', 'mal', 'equivocado', 'no es asi', 'no gracias',
-    'ya todo bien', 'asi dejelo', 'no deje asi', 'ninguno', 'nada mas'
-  ]
-  return frases.some(f => limpio === f || limpio.startsWith(f + ' '))
-}
-
-function esDespedidaOCortesia(limpio: string): boolean {
-  const palabras = [
-    'feliz noche', 'buenas noches', 'buena noche', 'hasta manana', 'hasta luego',
-    'que descanse', 'descanse', 'bendiciones', 'amen', 'chao', 'gracias feliz noche',
-    'muchas gracias', 'gracias a usted', 'listo gracias', 'vale gracias', 'todo bien',
-    'ya todo bien', 'no senor gracias', 'no gracias ya todo bien', 'no gracias'
-  ]
-  return palabras.some(p => limpio.includes(p)) || /^(gracias|muchas gracias|vale|ok gracias|chao|amen|bendiciones)$/i.test(limpio)
-}
-
-function esSaludoSimple(limpio: string): boolean {
-  const saludos = [
-    'hola', 'buen dia', 'buenos dias', 'buenas tardes', 'buenas',
-    'q tal', 'que tal', 'como estan', 'como esta', 'como vamos'
-  ]
-  return saludos.includes(limpio)
+function esDespedida(limpio: string): boolean {
+  return /^(gracias|muchas gracias|feliz noche|buenas noches|hasta manana|bendiciones|que descanse)$/i.test(limpio)
 }
 
 async function enviarWhatsApp(to: string, text: string) {
