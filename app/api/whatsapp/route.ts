@@ -9,7 +9,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ''
 type TipoOperacion = 'estudio_suelo' | 'pilote' | 'standby' | 'logistica'
 
 interface MensajeHistorial {
-  role: 'user' | 'model'
+  role: string
   text: string
 }
 
@@ -77,10 +77,10 @@ export async function POST(req: Request) {
     const frenteNombre = trabajador.proyectos?.nombre || 'General'
     const estadoActual = trabajador.estado_conversacion || 'inactivo'
 
-    const rawMemoria = trabajador.borrador_reporte || {}
+    const rawMemoria = (trabajador.borrador_reporte as any) || {}
     const memoria: MemoriaConversacion = {
       datos: rawMemoria.datos || (rawMemoria.tipo ? rawMemoria : {}),
-      historial: rawMemoria.historial || []
+      historial: Array.isArray(rawMemoria.historial) ? rawMemoria.historial : []
     }
 
     // CLIC EN EL BOTÓN DE LA PLANTILLA
@@ -119,7 +119,7 @@ export async function POST(req: Request) {
       const textoMensaje = message.text?.body?.trim() || ''
       const textoLimpio = normalizarTexto(textoMensaje)
 
-      // ESTADO INACTIVO: REPORTE YA ASENTADO
+      // ESTADO INACTIVO: REPORTE YA GUARDADO PREVIAMENTE
       if (estadoActual === 'inactivo') {
         if (esDespedidaOInterjeccion(textoLimpio)) {
           await enviarWhatsApp(
@@ -189,10 +189,8 @@ export async function POST(req: Request) {
       }
 
       // CEREBRO GEMINI CON HISTORIAL MULTI-TURN
-      const historialActualizado: MensajeHistorial[] = [
-        ...(memoria.historial || []),
-        { role: 'user', text: textoMensaje }
-      ].slice(-6)
+      const nuevoItem: MensajeHistorial = { role: 'user', text: textoMensaje }
+      const historialActualizado: MensajeHistorial[] = [...(memoria.historial || []), nuevoItem].slice(-6)
 
       const decisionIA = await consultarGeminiInteligente(
         textoMensaje,
@@ -231,7 +229,8 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'saved_by_ai' })
       }
 
-      historialActualizado.push({ role: 'model', text: decisionIA.respuesta_whatsapp })
+      const respuestaItem: MensajeHistorial = { role: 'model', text: decisionIA.respuesta_whatsapp }
+      historialActualizado.push(respuestaItem)
 
       const nuevaMemoria: MemoriaConversacion = {
         datos: { ...(memoria.datos || {}), ...decisionIA.datos_actualizados },
@@ -405,7 +404,7 @@ function esDespedidaOInterjeccion(limpio: string): boolean {
     'hasta manana', 'bendiciones', 'que descanse', 'uuy', 'uy', 'epa', 'listo gracias',
     'vale gracias', 'todo bien', 'chao', 'amen', 'nos vemos', '👍', '🙏', 'gracias mano'
   ]
-  return palabras.some(p => limpio.includes(p)) || /^(gracias|ok gracias|chao|feliz noche|buenas noches|uuy|uy)$/i.test(limpio)
+  return palabras.includes(limpio) || /^(gracias|ok gracias|chao|feliz noche|buenas noches|uuy|uy)$/i.test(limpio)
 }
 
 async function enviarWhatsApp(to: string, text: string) {
