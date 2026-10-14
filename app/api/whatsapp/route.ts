@@ -145,7 +145,7 @@ export async function POST(req: Request) {
 
         await enviarWhatsApp(
           from,
-          `🔄 Listo Don ${nombreOperador}, dígame qué modificamos del reporte de hoy (metros, pilote/sondeo o novedades) y se lo actualizo de una.`
+          `🔄 Listo Don ${nombreOperador}, dígame qué modificamos del reporte de hoy (metros, novedades o pilote/sondeo) y se lo actualizo de una.`
         )
         return NextResponse.json({ status: 'ready_to_correct' })
       }
@@ -160,7 +160,7 @@ export async function POST(req: Request) {
           return NextResponse.json({ status: 'closed_turn_courtesy' })
         }
 
-        const quiereReportar = /\b(reiniciar|corregir|cambiar|nuevo reporte|reportar|modificar|otro reporte|mentiras|espera|fueron|hicimos|avance)\b/i.test(textoLimpio) ||
+        const quiereReportar = /\b(reiniciar|corregir|cambiar|nuevo reporte|reportar|modificar|otro reporte|mentiras|espera|fueron|hicimos|avance|varado|barado)\b/i.test(textoLimpio) ||
                                /\b(\d+|un|uno|dos|tres|cuatro|cinco)\s*(?:m|mt|metros|pq|prehueco|sondeo|pilote)\b/i.test(textoLimpio)
 
         if (!quiereReportar) {
@@ -171,7 +171,6 @@ export async function POST(req: Request) {
           return NextResponse.json({ status: 'already_saved_acknowledged' })
         }
 
-        // Si quiere corregir en el mismo mensaje
         memoria.datos = {}
         memoria.historial = []
       }
@@ -255,7 +254,6 @@ async function guardarOActualizarReporte(trabajador: any, d: DatosReporte, texto
   const hoy = new Date()
   hoy.setHours(0, 0, 0, 0)
 
-  // Revisar si ya reportó hoy para actualizar o insertar
   const { data: existentes } = await supabase
     .from('reportes_operativos')
     .select('id')
@@ -297,33 +295,29 @@ async function consultarGeminiInteligente(
   datosPrevios: DatosReporte,
   historial: MensajeHistorial[]
 ): Promise<{ accion: string; respuesta_whatsapp: string; datos_actualizados: DatosReporte }> {
-  // Lista de modelos principales de Gemini
-  const modelos = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-flash-latest']
+  const modelos = ['gemini-flash-latest', 'gemini-1.5-flash', 'gemini-2.5-flash']
 
   const prompt = `
 Eres el Asistente de Operaciones de "JHF Perforaciones S.A.S." en Colombia.
 Hablas con "Don ${operador}" en el frente "${frente}". 
 Tono: humano, cercano, respetuoso de obra ("Don ${operador}", "mano", "listo", "hágale").
 
-CONTEXTO Y VOCABULARIO DE OBRA COLOMBIANA:
-- Los operarios usan jerga colombiana y a veces hacen bromas pesadas o groserías de confianza ("marica", "carechimba", "mariconsuelo", "ome", "parce", chistes de doble sentido).
-- NUNCA te ofendas ni los regañes; tómalo con buen humor de obra y camaradería, y de inmediato guíalos con amabilidad a dar los datos reales de la jornada.
-- "prehueco" o "PQ" = avance pq (operación de pilote).
-- "sondeo" = estudio de suelo.
-- Si no saben el número de pilote ("no sé en cuál estoy", "me toca preguntar"), pon "P-01 (Por verificar)".
-- Si confirman ("si", "ok", "listo", "de una", "dejemos asi", "asi es"), accion: "guardar_reporte".
-- Si dicen que SST o lluvia los paró, guárdalo en observaciones.
+JERGA Y SITUACIONES DE OBRA:
+1. VARADAS Y PAROS: Si dicen que estuvieron varados ("barado", "varado", "se reventó la correa/polea", "daño mecánico", "paró SST", "llovió"):
+   - Si no avanzaron o dicen "ninguno", "cero", "nada": avance metros = 0, pq = 0, tipo = "standby".
+   - Registra en observaciones la razón de la varada (ej: "Varado por polea y correa reventada, sin avance").
+   - Pide confirmación de una vez: "¿Le parece bien dejar anotada la varada de la polea y correa con 0 metros en bitácora? Responda SÍ para confirmar."
+2. BROMAS Y VULGARIDADES: Si dicen bromas pesadas o groserías de confianza ("marica", "carechimba", "mariconsuelo", chistes de doble sentido), no te ofendas ni los sermonees; respóndeles con buen humor y camaradería de obra y llévalos a los datos reales.
+3. PREHUECO / PQ: es operación de pilote.
+4. SONDEO: es estudio de suelo.
+5. CONFIRMACIÓN: Si confirman ("si", "ok", "listo", "de una", "dejemos asi"), accion: "guardar_reporte".
 
 DATOS PREVIOS RECOLECTADOS: ${JSON.stringify(datosPrevios)}
 HISTORIAL DE CHAT:
 ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
-ÚLTIMO MENSAJE DEL OPERADOR: "${mensaje}"
+ÚLTIMO MENSAJE: "${mensaje}"
 
-INSTRUCCIONES CLAVE:
-1. Extrae los metros reales que mencione el operador (por ejemplo si dice 15 metros, pon 15, no inventes números).
-2. Si sólo dice una broma o grosería sin datos, responde con chispa y pídele con respeto los metros o novedades de hoy.
-
-Devuelve ÚNICAMENTE un objeto JSON válido con esta estructura exacta:
+Devuelve ÚNICAMENTE un JSON:
 {
   "accion": "conversar" | "pedir_confirmacion" | "guardar_reporte",
   "respuesta_whatsapp": "Texto para WhatsApp",
@@ -340,12 +334,11 @@ Devuelve ÚNICAMENTE un objeto JSON válido con esta estructura exacta:
 }
 `
 
-  // Desactivación de filtros de seguridad para admitir el lenguaje coloquial de obra
   const safetySettings = [
-    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
+    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
+    { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
+    { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_ONLY_HIGH' }
   ]
 
   for (const modelo of modelos) {
@@ -373,17 +366,19 @@ Devuelve ÚNICAMENTE un objeto JSON válido con esta estructura exacta:
             datos_actualizados: (parsed.datos_actualizados || {}) as DatosReporte
           }
         }
+      } else {
+        const errText = await res.text()
+        console.warn(`⚠️ Gemini API ${modelo} respondió status ${res.status}:`, errText)
       }
     } catch (e: any) {
-      console.warn(`Error en modelo ${modelo}:`, e.message)
+      console.warn(`Error llamando a ${modelo}:`, e.message)
     }
   }
 
-  return respaldoContextualLimpio(mensaje, operador, frente, datosPrevios)
+  return respaldoContextualInteligente(mensaje, operador, frente, datosPrevios)
 }
 
-// Respaldo sin inventar datos quemados
-function respaldoContextualLimpio(
+function respaldoContextualInteligente(
   raw: string,
   operador: string,
   frente: string,
@@ -399,7 +394,26 @@ function respaldoContextualLimpio(
     }
   }
 
-  // Buscar si el usuario mencionó un número en su mensaje (ej: 15, 3.5)
+  // 1. Detección de VARADAS, DAÑOS MECÁNICOS O CERO METROS
+  const esVarada = /\b(varad|barad|polea|correa|dano|daniad|danad|revent|frenad|parados|mantenimiento|ningun|nada|cero|no avanz|no pud|no hic)\b/i.test(t)
+  if (esVarada) {
+    return {
+      accion: 'pedir_confirmacion',
+      respuesta_whatsapp:
+        `¡Qué vaina Don ${operador}! Entendido el tema mecánico con la polea y correa mano. Le anotamos 0 metros de avance y la novedad de la varada para la bitácora.\n\n` +
+        `¿Le parece bien para dejarlo guardado? Responda *SÍ* para confirmar.`,
+      datos_actualizados: {
+        tipo: 'standby',
+        sondeo: previo.sondeo || null,
+        pilote: previo.pilote || null,
+        metros: 0,
+        pq: 0,
+        observaciones: `Varado: ${raw}`
+      }
+    }
+  }
+
+  // 2. Detección de metros numéricos
   const matchNum = raw.match(/(\d+(?:[.,]\d+)?)/)
   const numero = matchNum ? parseFloat(matchNum[1].replace(',', '.')) : null
 
@@ -425,7 +439,6 @@ function respaldoContextualLimpio(
     }
   }
 
-  // Si no dijo números ni nada entendible, pregunta amablemente SIN inventar metros
   return {
     accion: 'conversar',
     respuesta_whatsapp:
