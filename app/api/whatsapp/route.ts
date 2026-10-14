@@ -6,13 +6,15 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || ''
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_ID || ''
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ''
 
+type TipoOperacion = 'estudio_suelo' | 'pilote' | 'standby' | 'logistica'
+
 interface MensajeHistorial {
   role: 'user' | 'model'
   text: string
 }
 
 interface DatosReporte {
-  tipo?: 'estudio_suelo' | 'pilote' | 'standby' | 'logistica'
+  tipo?: TipoOperacion
   sondeo?: string | null
   pilote?: string | null
   metros?: number | null
@@ -75,14 +77,13 @@ export async function POST(req: Request) {
     const frenteNombre = trabajador.proyectos?.nombre || 'General'
     const estadoActual = trabajador.estado_conversacion || 'inactivo'
 
-    // Normalizar estructura de memoria previa
     const rawMemoria = trabajador.borrador_reporte || {}
     const memoria: MemoriaConversacion = {
       datos: rawMemoria.datos || (rawMemoria.tipo ? rawMemoria : {}),
       historial: rawMemoria.historial || []
     }
 
-    // 1. CLIC EN EL BOTÓN DE LA PLANTILLA
+    // CLIC EN EL BOTÓN DE LA PLANTILLA
     if (message.type === 'button' || message.type === 'interactive') {
       await supabase.from('trabajadores').update({
         estado_conversacion: 'esperando_reporte',
@@ -118,11 +119,8 @@ export async function POST(req: Request) {
       const textoMensaje = message.text?.body?.trim() || ''
       const textoLimpio = normalizarTexto(textoMensaje)
 
-      // ========================================================
-      // 2. COMPORTAMIENTO EN ESTADO INACTIVO (REPORTE YA CERRADO)
-      // ========================================================
+      // ESTADO INACTIVO: REPORTE YA ASENTADO
       if (estadoActual === 'inactivo') {
-        // Cortesías, agradecimientos o interjecciones de cierre
         if (esDespedidaOInterjeccion(textoLimpio)) {
           await enviarWhatsApp(
             from,
@@ -131,7 +129,6 @@ export async function POST(req: Request) {
           return NextResponse.json({ status: 'closed_turn_courtesy' })
         }
 
-        // Si el usuario quiere corregir o abrir un nuevo reporte explícitamente
         const quiereReportar = /\b(reiniciar|corregir|cambiar|nuevo reporte|reportar|modificar|otro reporte)\b/i.test(textoLimpio) ||
                                /\b(\d+|un|uno|dos|tres|cuatro|cinco)\s*(?:m|mt|metros|pq|prehueco|sondeo|pilote)\b/i.test(textoLimpio)
 
@@ -143,14 +140,11 @@ export async function POST(req: Request) {
           return NextResponse.json({ status: 'already_saved_acknowledged' })
         }
 
-        // Si decidió corregir o reportar de nuevo, reabrimos conversación limpia
         memoria.datos = {}
         memoria.historial = []
       }
 
-      // ========================================================
-      // 3. REINICIAR CONVERSACIÓN
-      // ========================================================
+      // REINICIAR CONVERSACIÓN
       if (/\b(cancelar|anular|borrar|reiniciar|empezar de nuevo)\b/i.test(textoLimpio)) {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'esperando_reporte',
@@ -161,9 +155,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'reset' })
       }
 
-      // ========================================================
-      // 4. CONFIRMACIÓN DIRECTA CON "SÍ"
-      // ========================================================
+      // CONFIRMACIÓN DIRECTA CON "SÍ"
       if (estadoActual === 'esperando_confirmacion' && esConfirmacion(textoLimpio)) {
         const d = memoria.datos || {}
 
@@ -196,11 +188,11 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'saved_direct' })
       }
 
-      // ========================================================
-      // 5. CEREBRO IA: MULTI-TURN CONVERSACIONAL (GEMINI)
-      // ========================================================
-      // Agregar el nuevo mensaje del usuario al historial rodante
-      const historialActualizado = [...(memoria.historial || []), { role: 'user' as const, text: textoMensaje }].slice(-6)
+      // CEREBRO GEMINI CON HISTORIAL MULTI-TURN
+      const historialActualizado: MensajeHistorial[] = [
+        ...(memoria.historial || []),
+        { role: 'user', text: textoMensaje }
+      ].slice(-6)
 
       const decisionIA = await consultarGeminiInteligente(
         textoMensaje,
@@ -210,7 +202,6 @@ export async function POST(req: Request) {
         historialActualizado
       )
 
-      // Si Gemini detectó confirmación
       if (decisionIA.accion === 'guardar_reporte') {
         const d = { ...(memoria.datos || {}), ...decisionIA.datos_actualizados }
 
@@ -240,7 +231,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'saved_by_ai' })
       }
 
-      // Si la IA responde para conversar o pedir confirmación
       historialActualizado.push({ role: 'model', text: decisionIA.respuesta_whatsapp })
 
       const nuevaMemoria: MemoriaConversacion = {
@@ -264,7 +254,6 @@ export async function POST(req: Request) {
   }
 }
 
-// CEREBRO GEMINI CON MEMORIA CONVERSACIONAL Y JERGA GEOTÉCNICA COLOMBIANA
 async function consultarGeminiInteligente(
   mensaje: string,
   operador: string,
@@ -290,19 +279,16 @@ ${historial.map(h => `${h.role === 'user' ? 'Operador' : 'Asistente JHF'}:${h.te
 
 REGLAS DE INTELIGENCIA CONVERSACIONAL:
 1. SI CORRIGE O ACLARA UN DATO (ej: "pero yo no estoy en el p1, no sé en cuál estoy"):
-   - Entiende el contexto: sabe que sigue en Pilotaje y que tiene 2 metros de prehueco/PQ.
-   - Si no sabe el pilote, no pelees ni inventes sondeos de suelo; pon "Pilote: Por verificar" o "P-01 (Provisional)".
-   - Responde con empatía y tranquilidad: dile que fresco, que lo dejas como pendiente de número y pídele confirmar.
+   - Entiende el contexto: sabe que sigue en Pilotaje y que tiene los metros de prehueco/PQ.
+   - Si no sabe el pilote, pon "Pilote: Por verificar" o "P-01 (Provisional)".
+   - Responde con tranquilidad y pídele confirmar.
    - accion: "pedir_confirmacion".
 
 2. SI EL OPERADOR CONFIRMA (ej: "si", "mm Si", "listo", "ok", "correcto", "de una"):
-   - Si ya hay datos acumulados (metros, pilote, sondeo o novedad de SST/clima), ciérralo con alegría.
-   - Deséale buen descanso.
    - accion: "guardar_reporte".
 
 3. SI DICE BROMAS O TEMAS AJENOS (ej: "sexo", "o se maria la loca", "hagmos el amor..."):
-   - Si ya venían hablando de la obra, mantén la buena onda pero pídele que te confirme los datos para no dejarlo sin reporte.
-   - Si no ha dado datos, haz un chiste respetuoso y pregúntale cómo le fue hoy en la obra.
+   - Responde con humor ligero y pídele en serio los datos de trabajo.
    - accion: "conversar".
 
 4. SI SE DESPIDE O DICE GRACIAS:
@@ -313,14 +299,14 @@ REGLAS DE INTELIGENCIA CONVERSACIONAL:
    - "prehueco" o "PQ" = avance en Preperforación PQ de pilote (tipo: "pilote").
    - "cuchara partida" o "SPT" = ensayos SPT (tipo: "estudio_suelo").
    - "lluvia", "varada de máquina", "parada por SST" = novedades operativas reales.
-   - En "observaciones" pon únicamente hechos técnicos (ej: "Labores detenidas por SST"). NUNCA pongas comentarios informales como "me toca preguntar ome".
+   - En "observaciones" pon únicamente hechos técnicos (ej: "Labores detenidas por SST"). Nunca pongas comentarios informales como "me toca preguntar ome".
 
 Devuelve ÚNICAMENTE un JSON válido:
 {
   "accion": "conversar" | "pedir_confirmacion" | "guardar_reporte",
-  "respuesta_whatsapp": "Texto natural y estructurado que se enviará al operador",
+  "respuesta_whatsapp": "Texto que se enviará al operador",
   "datos_actualizados": {
-    "tipo": "estudio_suelo" | "pilote" | "standby",
+    "tipo": "estudio_suelo" | "pilote" | "standby" | "logistica",
     "sondeo": string | null,
     "pilote": string | null,
     "metros": number | null,
@@ -349,26 +335,36 @@ Devuelve ÚNICAMENTE un JSON válido:
         const data = await res.json()
         let raw = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
         raw = raw.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim()
-        if (raw) return JSON.parse(raw)
-      } else {
-        console.warn(`Modelo ${modelo} devolvió ${res.status}, probando siguiente modelo...`)
+        if (raw) {
+          const parsed = JSON.parse(raw)
+          return {
+            accion: parsed.accion || 'conversar',
+            respuesta_whatsapp: parsed.respuesta_whatsapp || '',
+            datos_actualizados: (parsed.datos_actualizados || {}) as DatosReporte
+          }
+        }
       }
     } catch (e: any) {
       console.warn(`Error llamando a ${modelo}:`, e.message)
     }
   }
 
-  // Respaldo de contingencia respetando la actividad previa
   return respaldoContextual(mensaje, operador, frente, datosPrevios)
 }
 
-function respaldoContextual(raw: string, operador: string, frente: string, previo: DatosReporte) {
+function respaldoContextual(
+  raw: string,
+  operador: string,
+  frente: string,
+  previo: DatosReporte
+): { accion: string; respuesta_whatsapp: string; datos_actualizados: DatosReporte } {
   const t = normalizarTexto(raw)
   const esPilote = previo.tipo === 'pilote' || /\b(pilote|pilotaje|pq|prehueco|pre hueco)\b/i.test(t)
   const punto = esPilote ? (previo.pilote || 'P-01 (Por verificar)') : (previo.sondeo || 'S-01')
   const pq = esPilote ? (previo.pq || 2) : 0
   const metros = !esPilote ? (previo.metros || 2) : 0
   const obs = previo.observaciones || 'Labores detenidas por SST'
+  const tipoCalculado: TipoOperacion = esPilote ? 'pilote' : 'estudio_suelo'
 
   if (esConfirmacion(t)) {
     return {
@@ -384,7 +380,7 @@ function respaldoContextual(raw: string, operador: string, frente: string, previ
       `¡Tranquilo Don ${operador}! Dejamos el punto como *${punto}* con sus${pq || metros} m y la novedad de SST.\n\n` +
       `¿Le parece bien para guardarlo en bitácora? Responda *SÍ* para confirmar.`,
     datos_actualizados: {
-      tipo: esPilote ? 'pilote' : 'estudio_suelo',
+      tipo: tipoCalculado,
       pilote: esPilote ? punto : null,
       sondeo: !esPilote ? punto : null,
       pq,
@@ -409,7 +405,7 @@ function esDespedidaOInterjeccion(limpio: string): boolean {
     'hasta manana', 'bendiciones', 'que descanse', 'uuy', 'uy', 'epa', 'listo gracias',
     'vale gracias', 'todo bien', 'chao', 'amen', 'nos vemos', '👍', '🙏', 'gracias mano'
   ]
-  return palabras.includes(limpio) || /^(gracias|ok gracias|chao|feliz noche|buenas noches|uuy|uy)$/i.test(limpio)
+  return palabras.some(p => limpio.includes(p)) || /^(gracias|ok gracias|chao|feliz noche|buenas noches|uuy|uy)$/i.test(limpio)
 }
 
 async function enviarWhatsApp(to: string, text: string) {
