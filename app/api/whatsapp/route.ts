@@ -40,9 +40,11 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const body = await req.json()
+
     if (body.entry?.[0]?.changes?.[0]?.value?.statuses) {
       console.log('📢 ESTADO ENTREGA META:', JSON.stringify(body.entry[0].changes[0].value.statuses, null, 2))
     }
+
     const entry = body.entry?.[0]
     const changes = entry?.changes?.[0]
     const value = changes?.value
@@ -51,13 +53,13 @@ export async function POST(req: Request) {
     if (!message) return NextResponse.json({ status: 'ignored_no_message' })
 
     const from = message.from
-    const cleanFrom = from.replace(/\D/g, '')
-    const localPhone = cleanFrom.startsWith('57') ? cleanFrom.slice(2) : cleanFrom
+    const cleanTo = from.replace(/\D/g, '')
+    const localPhone = cleanTo.startsWith('57') ? cleanTo.slice(2) : cleanTo
 
     const { data: trabajadores } = await supabase
       .from('trabajadores')
       .select('*, proyectos(nombre)')
-      .or(`telefono.eq.${cleanFrom},telefono.eq.${localPhone}`)
+      .or(`telefono.eq.${cleanTo},telefono.eq.${localPhone}`)
       .eq('activo', true)
 
     const trabajador = trabajadores?.[0]
@@ -68,6 +70,25 @@ export async function POST(req: Request) {
         '⚠️ Este número no se encuentra registrado como personal operativo activo en el sistema de JHF Perforaciones.'
       )
       return NextResponse.json({ status: 'unregistered_user' })
+    }
+
+    // CLIC EN BOTÓN DE PLANTILLA ("Confirmar recepción")
+    if (message.type === 'button' || message.type === 'interactive') {
+      const nombreOperador = trabajador.nombre
+      const frenteNombre = trabajador.proyectos?.nombre || 'General'
+
+      await supabase.from('trabajadores').update({
+        estado_conversacion: 'esperando_reporte_diario',
+        borrador_reporte: null
+      }).eq('id', trabajador.id)
+
+      await enviarWhatsApp(
+        from,
+        `👋 ¡Hola ${nombreOperador}! Te saluda el Sistema de Control Operativo de *JHF Perforaciones S.A.S.*\n\n` +
+        `¿Cómo les fue hoy en *${frenteNombre}*?\n\n` +
+        `Por favor cuéntame en qué punto trabajaron (sondeo o pilote), cuántos metros avanzaron o si tuvieron alguna novedad (lluvia, trasteo o varada).`
+      )
+      return NextResponse.json({ status: 'button_welcome_sent' })
     }
 
     if (message.type === 'audio' || message.type === 'voice') {
@@ -86,26 +107,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'image_received' })
     }
 
-    // DETECTAR CLIC EN BOTÓN DE PLANTILLA ("Confirmar recepción")
-    if (message.type === 'button' || message.type === 'interactive') {
-      const botonTexto = message.button?.text || message.interactive?.button_reply?.title || ''
-      const nombreOperador = trabajador.nombre
-      const frenteNombre = trabajador.proyectos?.nombre || 'General'
-
-      await supabase.from('trabajadores').update({
-        estado_conversacion: 'esperando_reporte_diario',
-        borrador_reporte: null
-      }).eq('id', trabajador.id)
-
-      await enviarWhatsApp(
-        from,
-        `👋 ¡Hola ${nombreOperador}! Te saluda el Sistema de Control Operativo de *JHF Perforaciones S.A.S.*\n\n` +
-        `¿Cómo les fue hoy en *${frenteNombre}*?\n\n` +
-        `Por favor cuéntame en qué punto trabajaron (sondeo o pilote), cuántos metros avanzaron o si tuvieron alguna novedad (lluvia, trasteo o varada).`
-      )
-      return NextResponse.json({ status: 'button_welcome_sent' })
-    }
-
     if (message.type === 'text') {
       const textoCrudo = message.text?.body?.trim() || ''
       const textoLimpio = quitarTildes(textoCrudo.toLowerCase())
@@ -114,6 +115,7 @@ export async function POST(req: Request) {
       const nombreOperador = trabajador.nombre
       const frenteNombre = trabajador.proyectos?.nombre || 'General'
 
+      // Cancelar / reiniciar
       if (/\b(cancelar|anular|borrar|reiniciar|empezar de nuevo|borre eso)\b/i.test(textoLimpio)) {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'esperando_reporte_diario',
@@ -127,6 +129,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'cancelled' })
       }
 
+      // Confirmación positiva en esperando_confirmacion
       if (estadoActual === 'esperando_confirmacion' && esConfirmacionPositiva(textoLimpio)) {
         const b: CanastaReporte = trabajador.borrador_reporte || {}
 
@@ -159,6 +162,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'saved' })
       }
 
+      // Negación en esperando_confirmacion
       if (estadoActual === 'esperando_confirmacion' && esNegacionSimple(textoLimpio)) {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'esperando_reporte_diario',
@@ -172,10 +176,9 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'confirmation_rejected' })
       }
 
-      // INTERCEPTAR CORTESÍAS, AGRADECIMIENTOS Y DESPEDIDAS DE FIN DE TURNO
+      // Cortesías, despedidas, bendiciones y agradecimientos
       if (esDespedidaOCortesia(textoLimpio)) {
         if (estadoActual === 'esperando_confirmacion') {
-          // Si estaba en confirmación accidental y dice "no gracias / todo bien", se descarta
           await supabase.from('trabajadores').update({
             estado_conversacion: 'inactivo',
             borrador_reporte: null
@@ -188,7 +191,6 @@ export async function POST(req: Request) {
           return NextResponse.json({ status: 'courtesy_cancelled' })
         }
 
-        // Si ya había terminado o está inactivo
         await enviarWhatsApp(
           from,
           `🙏 ¡Con gusto ${nombreOperador}! Que descanses y tengas una excelente noche. Quedamos atentos para mañana.`
@@ -196,6 +198,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'courtesy_replied' })
       }
 
+      // Saludos simples
       if (esSaludoEstricto(textoLimpio)) {
         await enviarWhatsApp(
           from,
@@ -204,6 +207,16 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'greeting_replied' })
       }
 
+      // Si el operador ya reportó hoy y no trae avance técnico, no abrir borrador accidental
+      if (estadoActual === 'inactivo' && !tieneAvanceTecnico(textoLimpio) && !detectarLluvia(textoLimpio) && !detectarVaradaMecanica(textoLimpio) && !detectarLogisticaOStandby(textoLimpio)) {
+        await enviarWhatsApp(
+          from,
+          `👋 Hola ${nombreOperador}, tu reporte de hoy ya quedó guardado en el sistema. Si deseas modificarlo o agregar un avance extra, escríbeme *reiniciar*.`
+        )
+        return NextResponse.json({ status: 'already_reported_idle' })
+      }
+
+      // Novedad mecánica preguntando solución
       if (estadoActual === 'varada_preguntando_solucion') {
         if (!tieneAvanceTecnico(textoLimpio)) {
           const noVarado = /\b(no estoy|no estamos|no quedo|ya quedo|solucionado|listo|arreglado|trabajamos normal)\b/i.test(textoLimpio)
@@ -232,6 +245,7 @@ export async function POST(req: Request) {
         }
       }
 
+      // Lluvia
       if (detectarLluvia(textoLimpio) && !tieneAvanceTecnico(textoLimpio) && estadoActual !== 'esperando_datos_faltantes') {
         const resumen =
           `👷 *Operador:* ${nombreOperador}\n` +
@@ -253,6 +267,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'rain_handled' })
       }
 
+      // Varada mecánica
       if (detectarVaradaMecanica(textoLimpio) && !tieneAvanceTecnico(textoLimpio) && estadoActual !== 'esperando_datos_faltantes') {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'varada_preguntando_solucion',
@@ -266,6 +281,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'varada_followup' })
       }
 
+      // Logística o standby
       if (detectarLogisticaOStandby(textoLimpio) && !tieneAvanceTecnico(textoLimpio) && estadoActual !== 'esperando_datos_faltantes') {
         const resumen =
           `👷 *Operador:* ${nombreOperador}\n` +
@@ -285,6 +301,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'logistica_ready' })
       }
 
+      // Extracción técnica general
       const usarMemoria = estadoActual === 'esperando_datos_faltantes' || estadoActual === 'esperando_confirmacion'
       const nuevaCanasta = extraerDatosConDiccionarioCompleto(textoCrudo, usarMemoria ? canastaPrevia : {})
       const forzarCierre = Boolean(canastaPrevia.ya_pregunto) || estadoActual === 'esperando_datos_faltantes'
@@ -326,6 +343,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'unrecognized_short' })
       }
 
+      // Falta punto / sondeo
       if (!forzarCierre && !nuevaCanasta.sondeo && !nuevaCanasta.pilote && (nuevaCanasta.metros || nuevaCanasta.ensayos_spt || nuevaCanasta.muestras_shelby)) {
         nuevaCanasta.ya_pregunto = true
         await supabase.from('trabajadores').update({
@@ -340,11 +358,12 @@ export async function POST(req: Request) {
 
         await enviarWhatsApp(
           from,
-          `👍 ¡Excelente ${nombreOperador}, anotados ${textoAvance}!\n\nSolo me falta un dato:${preguntaPunto}`
+          `👍 ¡Excelente ${nombreOperador}, anotados ${textoAvance}!\n\nSolo me falta un dato: ${preguntaPunto}`
         )
         return NextResponse.json({ status: 'asking_point_once' })
       }
 
+      // Falta metraje
       if (!forzarCierre && (nuevaCanasta.sondeo || nuevaCanasta.pilote) && (nuevaCanasta.metros === null || nuevaCanasta.metros === undefined) && !nuevaCanasta.ensayos_spt && !nuevaCanasta.muestras_shelby) {
         nuevaCanasta.ya_pregunto = true
         await supabase.from('trabajadores').update({
@@ -360,6 +379,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'asking_meters_once' })
       }
 
+      // Resumen final estructurado
       const esPilote = nuevaCanasta.tipo === 'pilote' || Boolean(nuevaCanasta.pilote)
       let resumenFinal = ''
 
@@ -391,7 +411,7 @@ export async function POST(req: Request) {
         nuevaCanasta.tipo = 'estudio_suelo'
 
         const tramoInfo = (nuevaCanasta.tramo_inicio !== null && nuevaCanasta.tramo_inicio !== undefined && nuevaCanasta.tramo_fin !== null && nuevaCanasta.tramo_fin !== undefined)
-          ? ` (De ${nuevaCanasta.tramo_inicio} m a${nuevaCanasta.tramo_fin} m)`
+          ? ` (De ${nuevaCanasta.tramo_inicio} m a ${nuevaCanasta.tramo_fin} m)`
           : (nuevaCanasta.cota_actual ? ` (Profundidad alcanzada: ${nuevaCanasta.cota_actual} m)` : '')
 
         const recobroInfo = nuevaCanasta.recobro ? `\n• *Recobro / Muestra:* ${nuevaCanasta.recobro}` : ''
@@ -482,7 +502,7 @@ function extraerDatosConDiccionarioCompleto(textoCrudo: string, previo: CanastaR
   if (!c.detalle) {
     c.detalle = textoCrudo
   } else if (!c.detalle.includes(textoCrudo)) {
-    c.detalle = `${c.detalle} -${textoCrudo}`
+    c.detalle = `${c.detalle} - ${textoCrudo}`
   }
 
   const mencionaPilote = /\b(pilotes?|pilotaje|pq|ensanche|encamisado|vaciado|canastilla|caisson)\b/i.test(t) || /\bp[-_\s]*0*\d+\b/i.test(t)
@@ -571,7 +591,7 @@ function extraerDatosConDiccionarioCompleto(textoCrudo: string, previo: CanastaR
   const matchRecobro = t.match(/\b(?:recobro|recuperacion|rqd|r)\s*(?:de\s*|fue\s*|:|=)?\s*(\d+(?:\.\d+)?)\s*(cm|%|metros?)?/i)
   if (matchRecobro) {
     const unidad = matchRecobro[2] || 'cm'
-    c.recobro = `${matchRecobro[1]}${unidad}`
+    c.recobro = `${matchRecobro[1]} ${unidad}`
   } else if (/\b(sin recobro|no salio muestra|se lavo la muestra|recobro 0)\b/i.test(t)) {
     c.recobro = '0% (Lavado / Sin recuperación)'
   }
@@ -593,18 +613,6 @@ function extraerDatosConDiccionarioCompleto(textoCrudo: string, previo: CanastaR
   return c
 }
 
-
-function esDespedidaOCortesia(t: string): boolean {
-  const palabras = [
-    'feliz noche', 'buenas noches', 'buena noche', 'hasta manana', 'hasta luego',
-    'que descanse', 'descanse', 'bendiciones', 'amen', 'chao', 'gracias feliz noche',
-    'muchas gracias', 'gracias a usted', 'listo gracias', 'vale gracias', 'todo bien',
-    'ya todo bien', 'no senor gracias', 'no gracias ya todo bien', 'no gracias'
-  ]
-  const limpio = t.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim()
-  return palabras.some(p => limpio.includes(p)) || /^(gracias|muchas gracias|vale|ok gracias|chao|amen|bendiciones)$/i.test(limpio)
-}
-
 function esConfirmacionPositiva(t: string): boolean {
   const limpio = t.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim()
   const afirmaciones = [
@@ -624,12 +632,17 @@ function esNegacionSimple(t: string): boolean {
     'ya todo bien', 'asi dejelo', 'no deje asi', 'ninguno', 'nada mas'
   ]
   return frases.some(f => limpio === f || limpio.startsWith(f + ' '))
-}=\-_`~()¿?¡!]/g, '').trim()
-  const negaciones = [
-    'no', 'noo', 'nop', 'no senor', 'incorrecto', 'asi no', 'esta mal',
-    'negativo', 'eso no fue', 'mal', 'equivocado', 'no es asi'
+}
+
+function esDespedidaOCortesia(t: string): boolean {
+  const palabras = [
+    'feliz noche', 'buenas noches', 'buena noche', 'hasta manana', 'hasta luego',
+    'que descanse', 'descanse', 'bendiciones', 'amen', 'chao', 'gracias feliz noche',
+    'muchas gracias', 'gracias a usted', 'listo gracias', 'vale gracias', 'todo bien',
+    'ya todo bien', 'no senor gracias', 'no gracias ya todo bien', 'no gracias'
   ]
-  return negaciones.includes(limpio)
+  const limpio = t.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim()
+  return palabras.some(p => limpio.includes(p)) || /^(gracias|muchas gracias|vale|ok gracias|chao|amen|bendiciones)$/i.test(limpio)
 }
 
 function esSaludoEstricto(t: string): boolean {
