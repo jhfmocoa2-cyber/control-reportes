@@ -2,9 +2,7 @@ import { NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
 
 const META_VERIFY_TOKEN = 'clave_secreta_reportes_2026'
-// URL OFICIAL Y DIRECTA DE JHF PERFORACIONES S.A.S. (+57 321 9641803)
 const META_MESSAGES_URL = 'https://graph.facebook.com/v19.0/1370874296109664/messages'
-
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ''
 
 type TipoOperacion = 'estudio_suelo' | 'pilote' | 'standby' | 'logistica'
@@ -106,8 +104,6 @@ export async function POST(req: Request) {
       /\b(confirmar recepcion|confirmar|recepcion)\b/i.test(textoLimpio)
 
     if (esConfirmarRecepcion) {
-      console.log(`✅ Recepción confirmada para ${nombreOperador}. Iniciando reporte diario.`)
-
       await supabase.from('trabajadores').update({
         estado_conversacion: 'esperando_reporte',
         borrador_reporte: { datos: {}, historial: [] }
@@ -140,26 +136,42 @@ export async function POST(req: Request) {
 
     // 2. PROCESAMIENTO DE MENSAJES DE TEXTO
     if (message.type === 'text') {
+      // Manejo de corrección explícita
+      if (textoLimpio === 'corregir' || textoLimpio === 'cambiar' || textoLimpio === 'modificar') {
+        await supabase.from('trabajadores').update({
+          estado_conversacion: 'esperando_reporte',
+          borrador_reporte: { datos: {}, historial: [] }
+        }).eq('id', trabajador.id)
+
+        await enviarWhatsApp(
+          from,
+          `🔄 Listo Don ${nombreOperador}, dígame qué modificamos del reporte de hoy (metros, pilote/sondeo o novedades) y se lo actualizo de una.`
+        )
+        return NextResponse.json({ status: 'ready_to_correct' })
+      }
+
+      // Si el reporte ya estaba cerrado y saluda o se despide
       if (estadoActual === 'inactivo') {
         if (esDespedidaOInterjeccion(textoLimpio)) {
           await enviarWhatsApp(
             from,
-            `🙏 ¡Con todo el gusto Don ${nombreOperador}! Buen descanso y que pase feliz noche. Quedamos atentos para mañana.`
+            `🙏 ¡Con todo el gusto Don ${nombreOperador}! Buen descanso y que pase feliz noche.`
           )
           return NextResponse.json({ status: 'closed_turn_courtesy' })
         }
 
-        const quiereReportar = /\b(reiniciar|corregir|cambiar|nuevo reporte|reportar|modificar|otro reporte)\b/i.test(textoLimpio) ||
+        const quiereReportar = /\b(reiniciar|corregir|cambiar|nuevo reporte|reportar|modificar|otro reporte|mentiras|espera|fueron|hicimos|avance)\b/i.test(textoLimpio) ||
                                /\b(\d+|un|uno|dos|tres|cuatro|cinco)\s*(?:m|mt|metros|pq|prehueco|sondeo|pilote)\b/i.test(textoLimpio)
 
         if (!quiereReportar) {
           await enviarWhatsApp(
             from,
-            `👍 Don ${nombreOperador}, su reporte de hoy ya quedó debidamente guardado en la bitácora de JHF Perforaciones. ¡Que descanse!\n\n*(Si necesita corregirlo o reportar algo adicional, escriba "corregir")*`
+            `👍 Don ${nombreOperador}, su reporte de hoy ya quedó debidamente guardado en la bitácora de JHF Perforaciones. ¡Que descanse!\n\n*(Si necesita corregir o cambiar algún dato, escriba "corregir")*`
           )
           return NextResponse.json({ status: 'already_saved_acknowledged' })
         }
 
+        // Si quiere corregir en el mismo mensaje
         memoria.datos = {}
         memoria.historial = []
       }
@@ -174,25 +186,10 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'reset' })
       }
 
+      // Guardar si confirma
       if (estadoActual === 'esperando_confirmacion' && esConfirmacion(textoLimpio)) {
         const d = memoria.datos || {}
-
-        await supabase.from('reportes_operativos').insert({
-          trabajador_id: trabajador.id,
-          proyecto_id: trabajador.proyecto_id,
-          trabajador_nombre: nombreOperador,
-          proyecto_nombre: frenteNombre,
-          tipo_operacion: d.tipo || 'estudio_suelo',
-          sondeo: d.sondeo || null,
-          pilote: d.pilote || null,
-          metros_nq: d.metros || 0,
-          avance_pq: d.pq || 0,
-          ensanche: d.ensanche || 0,
-          encamisado: d.encamisado || 0,
-          ensayos_spt: d.ensayos_spt || 0,
-          observaciones: d.observaciones || textoCrudo,
-          confirmado: true
-        })
+        await guardarOActualizarReporte(trabajador, d, textoCrudo)
 
         await supabase.from('trabajadores').update({
           estado_conversacion: 'inactivo',
@@ -219,23 +216,7 @@ export async function POST(req: Request) {
 
       if (decisionIA.accion === 'guardar_reporte') {
         const d = { ...(memoria.datos || {}), ...decisionIA.datos_actualizados }
-
-        await supabase.from('reportes_operativos').insert({
-          trabajador_id: trabajador.id,
-          proyecto_id: trabajador.proyecto_id,
-          trabajador_nombre: nombreOperador,
-          proyecto_nombre: frenteNombre,
-          tipo_operacion: d.tipo || 'estudio_suelo',
-          sondeo: d.sondeo || null,
-          pilote: d.pilote || null,
-          metros_nq: d.metros || 0,
-          avance_pq: d.pq || 0,
-          ensanche: d.ensanche || 0,
-          encamisado: d.encamisado || 0,
-          ensayos_spt: d.ensayos_spt || 0,
-          observaciones: d.observaciones || textoCrudo,
-          confirmado: true
-        })
+        await guardarOActualizarReporte(trabajador, d, textoCrudo)
 
         await supabase.from('trabajadores').update({
           estado_conversacion: 'inactivo',
@@ -270,6 +251,45 @@ export async function POST(req: Request) {
   }
 }
 
+async function guardarOActualizarReporte(trabajador: any, d: DatosReporte, textoCrudo: string) {
+  const hoy = new Date()
+  hoy.setHours(0, 0, 0, 0)
+
+  // Revisar si ya reportó hoy para actualizar o insertar
+  const { data: existentes } = await supabase
+    .from('reportes_operativos')
+    .select('id')
+    .eq('trabajador_id', trabajador.id)
+    .gte('created_at', hoy.toISOString())
+    .order('created_at', { ascending: false })
+    .limit(1)
+
+  const payload = {
+    trabajador_id: trabajador.id,
+    proyecto_id: trabajador.proyecto_id,
+    trabajador_nombre: trabajador.nombre,
+    proyecto_nombre: trabajador.proyectos?.nombre || 'General',
+    tipo_operacion: d.tipo || (d.pilote || d.pq || d.ensanche ? 'pilote' : 'estudio_suelo'),
+    sondeo: d.sondeo || null,
+    pilote: d.pilote || null,
+    metros_nq: d.metros || 0,
+    avance_pq: d.pq || 0,
+    ensanche: d.ensanche || 0,
+    encamisado: d.encamisado || 0,
+    ensayos_spt: d.ensayos_spt || 0,
+    observaciones: d.observaciones || textoCrudo,
+    confirmado: true
+  }
+
+  if (existentes && existentes.length > 0) {
+    console.log(`📝 Actualizando reporte existente id=${existentes[0].id} para ${trabajador.nombre}`)
+    await supabase.from('reportes_operativos').update(payload).eq('id', existentes[0].id)
+  } else {
+    console.log(`✨ Insertando nuevo reporte para ${trabajador.nombre}`)
+    await supabase.from('reportes_operativos').insert(payload)
+  }
+}
+
 async function consultarGeminiInteligente(
   mensaje: string,
   operador: string,
@@ -277,24 +297,33 @@ async function consultarGeminiInteligente(
   datosPrevios: DatosReporte,
   historial: MensajeHistorial[]
 ): Promise<{ accion: string; respuesta_whatsapp: string; datos_actualizados: DatosReporte }> {
-  const modelos = ['gemini-flash-latest', 'gemini-3.7-flash', 'gemini-3.5-flash']
+  // Lista de modelos principales de Gemini
+  const modelos = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-flash-latest']
 
   const prompt = `
 Eres el Asistente de Operaciones de "JHF Perforaciones S.A.S." en Colombia.
-Hablas con "Don ${operador}" en el frente "${frente}". Tono humano, cercano, respetuoso de obra ("Don ${operador}", "mano", "listo").
+Hablas con "Don ${operador}" en el frente "${frente}". 
+Tono: humano, cercano, respetuoso de obra ("Don ${operador}", "mano", "listo", "hágale").
 
-DATOS TÉCNICOS PREVIOS: ${JSON.stringify(datosPrevios)}
-HISTORIAL:
+CONTEXTO Y VOCABULARIO DE OBRA COLOMBIANA:
+- Los operarios usan jerga colombiana y a veces hacen bromas pesadas o groserías de confianza ("marica", "carechimba", "mariconsuelo", "ome", "parce", chistes de doble sentido).
+- NUNCA te ofendas ni los regañes; tómalo con buen humor de obra y camaradería, y de inmediato guíalos con amabilidad a dar los datos reales de la jornada.
+- "prehueco" o "PQ" = avance pq (operación de pilote).
+- "sondeo" = estudio de suelo.
+- Si no saben el número de pilote ("no sé en cuál estoy", "me toca preguntar"), pon "P-01 (Por verificar)".
+- Si confirman ("si", "ok", "listo", "de una", "dejemos asi", "asi es"), accion: "guardar_reporte".
+- Si dicen que SST o lluvia los paró, guárdalo en observaciones.
+
+DATOS PREVIOS RECOLECTADOS: ${JSON.stringify(datosPrevios)}
+HISTORIAL DE CHAT:
 ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
-ÚLTIMO MENSAJE: "${mensaje}"
+ÚLTIMO MENSAJE DEL OPERADOR: "${mensaje}"
 
-REGLAS:
-1. Si no sabe el pilote o sondeo ("no sé en cuál estoy", "me toca preguntar"), pon "P-01 (Por verificar)" y pide confirmación sin pelear ni inventar datos.
-2. Si confirma ("si", "ok", "listo", "de una"), accion: "guardar_reporte".
-3. Si dice bromas ("me jale el gansito", "crack", chistes), responde con humor de obra y pídele con respeto los datos reales de metros y avances.
-4. "prehueco" o "PQ" = avance pq (pilote).
+INSTRUCCIONES CLAVE:
+1. Extrae los metros reales que mencione el operador (por ejemplo si dice 15 metros, pon 15, no inventes números).
+2. Si sólo dice una broma o grosería sin datos, responde con chispa y pídele con respeto los metros o novedades de hoy.
 
-Devuelve ÚNICAMENTE un JSON:
+Devuelve ÚNICAMENTE un objeto JSON válido con esta estructura exacta:
 {
   "accion": "conversar" | "pedir_confirmacion" | "guardar_reporte",
   "respuesta_whatsapp": "Texto para WhatsApp",
@@ -311,6 +340,14 @@ Devuelve ÚNICAMENTE un JSON:
 }
 `
 
+  // Desactivación de filtros de seguridad para admitir el lenguaje coloquial de obra
+  const safetySettings = [
+    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+  ]
+
   for (const modelo of modelos) {
     if (!GEMINI_API_KEY) break
     try {
@@ -319,6 +356,7 @@ Devuelve ÚNICAMENTE un JSON:
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
+          safetySettings,
           generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
         })
       })
@@ -337,26 +375,21 @@ Devuelve ÚNICAMENTE un JSON:
         }
       }
     } catch (e: any) {
-      console.warn(`Error llamando a ${modelo}:`, e.message)
+      console.warn(`Error en modelo ${modelo}:`, e.message)
     }
   }
 
-  return respaldoContextual(mensaje, operador, frente, datosPrevios)
+  return respaldoContextualLimpio(mensaje, operador, frente, datosPrevios)
 }
 
-function respaldoContextual(
+// Respaldo sin inventar datos quemados
+function respaldoContextualLimpio(
   raw: string,
   operador: string,
   frente: string,
   previo: DatosReporte
 ): { accion: string; respuesta_whatsapp: string; datos_actualizados: DatosReporte } {
   const t = normalizarTexto(raw)
-  const esPilote = previo.tipo === 'pilote' || /\b(pilote|pilotaje|pq|prehueco|pre hueco)\b/i.test(t)
-  const punto = esPilote ? (previo.pilote || 'P-01 (Por verificar)') : (previo.sondeo || 'S-01')
-  const pq = esPilote ? (previo.pq || 2) : 0
-  const metros = !esPilote ? (previo.metros || 2) : 0
-  const obs = previo.observaciones || 'Labores detenidas por SST'
-  const tipoCalculado: TipoOperacion = esPilote ? 'pilote' : 'estudio_suelo'
 
   if (esConfirmacion(t)) {
     return {
@@ -366,19 +399,38 @@ function respaldoContextual(
     }
   }
 
-  return {
-    accion: 'pedir_confirmacion',
-    respuesta_whatsapp:
-      `¡Tranquilo Don ${operador}! Dejamos el punto como *${punto}* con sus${pq || metros} m y la novedad.\n\n` +
-      `¿Le parece bien para guardarlo en bitácora? Responda *SÍ* para confirmar.`,
-    datos_actualizados: {
-      tipo: tipoCalculado,
-      pilote: esPilote ? punto : null,
-      sondeo: !esPilote ? punto : null,
-      pq,
-      metros,
-      observaciones: obs
+  // Buscar si el usuario mencionó un número en su mensaje (ej: 15, 3.5)
+  const matchNum = raw.match(/(\d+(?:[.,]\d+)?)/)
+  const numero = matchNum ? parseFloat(matchNum[1].replace(',', '.')) : null
+
+  const esPilote = previo.tipo === 'pilote' || /\b(pilote|pilotaje|pq|prehueco|pre hueco)\b/i.test(t)
+  const punto = esPilote ? (previo.pilote || 'P-01 (Por verificar)') : (previo.sondeo || 'S-01')
+
+  if (numero !== null && numero > 0 && numero < 150) {
+    const pq = esPilote ? numero : 0
+    const metros = !esPilote ? numero : 0
+    return {
+      accion: 'pedir_confirmacion',
+      respuesta_whatsapp:
+        `¡Copiado Don ${operador}! Anotamos *${numero} m* en *${punto}* para hoy en${frente}.\n\n` +
+        `¿Está todo correcto? Responda *SÍ* para guardar en bitácora.`,
+      datos_actualizados: {
+        tipo: esPilote ? 'pilote' : 'estudio_suelo',
+        pilote: esPilote ? punto : null,
+        sondeo: !esPilote ? punto : null,
+        pq,
+        metros,
+        observaciones: raw
+      }
     }
+  }
+
+  // Si no dijo números ni nada entendible, pregunta amablemente SIN inventar metros
+  return {
+    accion: 'conversar',
+    respuesta_whatsapp:
+      `¡Buenas Don ${operador}! Cuénteme con calma mano: ¿cuántos metros perforaron hoy en ${frente} o qué novedad tuvieron en el turno?`,
+    datos_actualizados: { ...previo }
   }
 }
 
@@ -387,7 +439,7 @@ function normalizarTexto(t: string): string {
 }
 
 function esConfirmacion(limpio: string): boolean {
-  return /^(si|sii|siii|sip|ok|okay|listo|correcto|confirmo|confirmado|de una|dale|asi es|mm si|si senor)$/i.test(limpio) ||
+  return /^(si|sii|siii|sip|ok|okay|listo|correcto|confirmo|confirmado|de una|dale|asi es|mm si|si senor|dejemos asi|asi dejamos)$/i.test(limpio) ||
          /^si\b/i.test(limpio)
 }
 
@@ -409,7 +461,6 @@ async function enviarWhatsApp(to: string, text: string) {
   }
 
   try {
-    console.log(`📤 Enviando mensaje a ${to} usando URL fija de JHF...`)
     const res = await fetch(META_MESSAGES_URL, {
       method: 'POST',
       headers: {
