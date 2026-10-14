@@ -172,6 +172,30 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'confirmation_rejected' })
       }
 
+      // INTERCEPTAR CORTESÍAS, AGRADECIMIENTOS Y DESPEDIDAS DE FIN DE TURNO
+      if (esDespedidaOCortesia(textoLimpio)) {
+        if (estadoActual === 'esperando_confirmacion') {
+          // Si estaba en confirmación accidental y dice "no gracias / todo bien", se descarta
+          await supabase.from('trabajadores').update({
+            estado_conversacion: 'inactivo',
+            borrador_reporte: null
+          }).eq('id', trabajador.id)
+
+          await enviarWhatsApp(
+            from,
+            `👍 Entendido ${nombreOperador}. ¡Que tengas un excelente descanso y feliz noche!`
+          )
+          return NextResponse.json({ status: 'courtesy_cancelled' })
+        }
+
+        // Si ya había terminado o está inactivo
+        await enviarWhatsApp(
+          from,
+          `🙏 ¡Con gusto ${nombreOperador}! Que descanses y tengas una excelente noche. Quedamos atentos para mañana.`
+        )
+        return NextResponse.json({ status: 'courtesy_replied' })
+      }
+
       if (esSaludoEstricto(textoLimpio)) {
         await enviarWhatsApp(
           from,
@@ -569,6 +593,18 @@ function extraerDatosConDiccionarioCompleto(textoCrudo: string, previo: CanastaR
   return c
 }
 
+
+function esDespedidaOCortesia(t: string): boolean {
+  const palabras = [
+    'feliz noche', 'buenas noches', 'buena noche', 'hasta manana', 'hasta luego',
+    'que descanse', 'descanse', 'bendiciones', 'amen', 'chao', 'gracias feliz noche',
+    'muchas gracias', 'gracias a usted', 'listo gracias', 'vale gracias', 'todo bien',
+    'ya todo bien', 'no senor gracias', 'no gracias ya todo bien', 'no gracias'
+  ]
+  const limpio = t.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim()
+  return palabras.some(p => limpio.includes(p)) || /^(gracias|muchas gracias|vale|ok gracias|chao|amen|bendiciones)$/i.test(limpio)
+}
+
 function esConfirmacionPositiva(t: string): boolean {
   const limpio = t.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim()
   const afirmaciones = [
@@ -582,6 +618,13 @@ function esConfirmacionPositiva(t: string): boolean {
 
 function esNegacionSimple(t: string): boolean {
   const limpio = t.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim()
+  const frases = [
+    'no', 'noo', 'nop', 'no senor', 'incorrecto', 'asi no', 'esta mal',
+    'negativo', 'eso no fue', 'mal', 'equivocado', 'no es asi', 'no gracias',
+    'ya todo bien', 'asi dejelo', 'no deje asi', 'ninguno', 'nada mas'
+  ]
+  return frases.some(f => limpio === f || limpio.startsWith(f + ' '))
+}=\-_`~()¿?¡!]/g, '').trim()
   const negaciones = [
     'no', 'noo', 'nop', 'no senor', 'incorrecto', 'asi no', 'esta mal',
     'negativo', 'eso no fue', 'mal', 'equivocado', 'no es asi'
