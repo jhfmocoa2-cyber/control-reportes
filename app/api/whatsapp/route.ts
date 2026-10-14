@@ -2,8 +2,14 @@ import { NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
 
 const META_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'clave_secreta_reportes_2026'
-const WHATSAPP_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || ''
-const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_ID || ''
+
+// Blindaje contra variables con sintaxis ${...} o comillas accidentales
+const rawPhoneId = (process.env.WHATSAPP_PHONE_ID || '').replace(/['"]/g, '').trim()
+const PHONE_NUMBER_ID = (rawPhoneId && !rawPhoneId.includes('$')) ? rawPhoneId : '1370874296109664'
+
+const rawToken = (process.env.WHATSAPP_ACCESS_TOKEN || '').replace(/['"]/g, '').trim()
+const WHATSAPP_TOKEN = rawToken
+
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ''
 
 type TipoOperacion = 'estudio_suelo' | 'pilote' | 'standby' | 'logistica'
@@ -59,7 +65,6 @@ export async function POST(req: Request) {
 
     const from = message.from
     const cleanTo = from.replace(/\D/g, '')
-    // Extraer número local (soporta 573... y 5793...)
     const localPhone = cleanTo.replace(/^579?/, '')
 
     const { data: trabajadores, error: errTrabajador } = await supabase
@@ -93,11 +98,10 @@ export async function POST(req: Request) {
       historial: Array.isArray(rawMemoria.historial) ? rawMemoria.historial : []
     }
 
-    // EXTRAER TEXTO O CONTENIDO DEL MENSAJE
     const textoCrudo = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || ''
     const textoLimpio = normalizarTexto(textoCrudo)
 
-    // 1. RECEPCIÓN DE RONDA (BOTÓN, INTERACCIÓN O TEXTO "CONFIRMAR RECEPCIÓN")
+    // 1. CONFIRMAR RECEPCIÓN DE RONDA
     const esConfirmarRecepcion =
       message.type === 'button' ||
       message.type === 'interactive' ||
@@ -136,9 +140,8 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'image_received' })
     }
 
-    // 2. PROCESAMIENTO DE TEXTO
+    // 2. PROCESAMIENTO DE MENSAJES DE TEXTO
     if (message.type === 'text') {
-      // Si el turno ya estaba cerrado
       if (estadoActual === 'inactivo') {
         if (esDespedidaOInterjeccion(textoLimpio)) {
           await enviarWhatsApp(
@@ -163,7 +166,6 @@ export async function POST(req: Request) {
         memoria.historial = []
       }
 
-      // Reiniciar
       if (/\b(cancelar|anular|borrar|reiniciar|empezar de nuevo)\b/i.test(textoLimpio)) {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'esperando_reporte',
@@ -174,7 +176,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'reset' })
       }
 
-      // Confirmación directa con "SÍ"
       if (estadoActual === 'esperando_confirmacion' && esConfirmacion(textoLimpio)) {
         const d = memoria.datos || {}
 
@@ -207,7 +208,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'saved_direct' })
       }
 
-      // Evaluación inteligente con Gemini
       const nuevoItem: MensajeHistorial = { role: 'user', text: textoCrudo }
       const historialActualizado: MensajeHistorial[] = [...(memoria.historial || []), nuevoItem].slice(-6)
 
@@ -406,13 +406,15 @@ async function enviarWhatsApp(to: string, text: string) {
   if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
     console.error('❌ Credenciales incompletas para enviar WhatsApp:', {
       hasToken: Boolean(WHATSAPP_TOKEN),
-      hasPhoneId: Boolean(PHONE_NUMBER_ID)
+      phoneId: PHONE_NUMBER_ID
     })
     return
   }
 
+  const url = `[https://graph.facebook.com/v19.0/$](https://graph.facebook.com/v19.0/$){PHONE_NUMBER_ID}/messages`
+
   try {
-    const res = await fetch(`[https://graph.facebook.com/v19.0/$](https://graph.facebook.com/v19.0/$){PHONE_NUMBER_ID}/messages`, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
