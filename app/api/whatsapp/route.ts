@@ -46,26 +46,36 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const body = await req.json()
+    console.log('📩 WEBHOOK RECIBIDO:', JSON.stringify(body, null, 2))
+
     const entry = body.entry?.[0]
     const changes = entry?.changes?.[0]
     const value = changes?.value
     const message = value?.messages?.[0]
 
-    if (!message) return NextResponse.json({ status: 'ignored_no_message' })
+    if (!message) {
+      return NextResponse.json({ status: 'ignored_no_message' })
+    }
 
     const from = message.from
     const cleanTo = from.replace(/\D/g, '')
-    const localPhone = cleanTo.startsWith('57') ? cleanTo.slice(2) : cleanTo
+    // Extraer número local (soporta 573... y 5793...)
+    const localPhone = cleanTo.replace(/^579?/, '')
 
-    const { data: trabajadores } = await supabase
+    const { data: trabajadores, error: errTrabajador } = await supabase
       .from('trabajadores')
       .select('*, proyectos(nombre)')
-      .or(`telefono.eq.${cleanTo},telefono.eq.${localPhone}`)
+      .or(`telefono.eq.${cleanTo},telefono.eq.${localPhone},telefono.eq.57${localPhone}`)
       .eq('activo', true)
+
+    if (errTrabajador) {
+      console.error('❌ Error consultando trabajador en Supabase:', errTrabajador)
+    }
 
     const trabajador = trabajadores?.[0]
 
     if (!trabajador) {
+      console.warn(`⚠️ Teléfono no registrado en BD: cleanTo=${cleanTo}, local=${localPhone}`)
       await enviarWhatsApp(
         from,
         '⚠️ Este número no se encuentra registrado como personal operativo activo en el sistema de JHF Perforaciones.'
@@ -83,8 +93,19 @@ export async function POST(req: Request) {
       historial: Array.isArray(rawMemoria.historial) ? rawMemoria.historial : []
     }
 
-    // CLIC EN EL BOTÓN DE LA PLANTILLA
-    if (message.type === 'button' || message.type === 'interactive') {
+    // EXTRAER TEXTO O CONTENIDO DEL MENSAJE
+    const textoCrudo = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || ''
+    const textoLimpio = normalizarTexto(textoCrudo)
+
+    // 1. RECEPCIÓN DE RONDA (BOTÓN, INTERACCIÓN O TEXTO "CONFIRMAR RECEPCIÓN")
+    const esConfirmarRecepcion =
+      message.type === 'button' ||
+      message.type === 'interactive' ||
+      /\b(confirmar recepcion|confirmar|recepcion)\b/i.test(textoLimpio)
+
+    if (esConfirmarRecepcion) {
+      console.log(`✅ Recepción confirmada para ${nombreOperador}. Iniciando reporte diario.`)
+
       await supabase.from('trabajadores').update({
         estado_conversacion: 'esperando_reporte',
         borrador_reporte: { datos: {}, historial: [] }
@@ -92,7 +113,7 @@ export async function POST(req: Request) {
 
       await enviarWhatsApp(
         from,
-        `👋 ¡Hola Don ${nombreOperador}! Te saluda el Asistente de Control Operativo de *JHF Perforaciones S.A.S.*\n\n` +
+        `👋 ¡Hola Don ${nombreOperador}! Te saluda el Asistente de Operaciones de *JHF Perforaciones S.A.S.*\n\n` +
         `¿Cómo les fue hoy en *${frenteNombre}*?\n\n` +
         `Cuéntame cómo avanzaron (metros en sondeo o pilote) o si tuvieron novedades (lluvia, trasteo, SST o varadas).`
       )
@@ -115,11 +136,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'image_received' })
     }
 
+    // 2. PROCESAMIENTO DE TEXTO
     if (message.type === 'text') {
-      const textoMensaje = message.text?.body?.trim() || ''
-      const textoLimpio = normalizarTexto(textoMensaje)
-
-      // ESTADO INACTIVO: REPORTE YA GUARDADO PREVIAMENTE
+      // Si el turno ya estaba cerrado
       if (estadoActual === 'inactivo') {
         if (esDespedidaOInterjeccion(textoLimpio)) {
           await enviarWhatsApp(
@@ -144,7 +163,7 @@ export async function POST(req: Request) {
         memoria.historial = []
       }
 
-      // REINICIAR CONVERSACIÓN
+      // Reiniciar
       if (/\b(cancelar|anular|borrar|reiniciar|empezar de nuevo)\b/i.test(textoLimpio)) {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'esperando_reporte',
@@ -155,7 +174,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'reset' })
       }
 
-      // CONFIRMACIÓN DIRECTA CON "SÍ"
+      // Confirmación directa con "SÍ"
       if (estadoActual === 'esperando_confirmacion' && esConfirmacion(textoLimpio)) {
         const d = memoria.datos || {}
 
@@ -172,7 +191,7 @@ export async function POST(req: Request) {
           ensanche: d.ensanche || 0,
           encamisado: d.encamisado || 0,
           ensayos_spt: d.ensayos_spt || 0,
-          observaciones: d.observaciones || textoMensaje,
+          observaciones: d.observaciones || textoCrudo,
           confirmado: true
         })
 
@@ -188,12 +207,12 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'saved_direct' })
       }
 
-      // CEREBRO GEMINI CON HISTORIAL MULTI-TURN
-      const nuevoItem: MensajeHistorial = { role: 'user', text: textoMensaje }
+      // Evaluación inteligente con Gemini
+      const nuevoItem: MensajeHistorial = { role: 'user', text: textoCrudo }
       const historialActualizado: MensajeHistorial[] = [...(memoria.historial || []), nuevoItem].slice(-6)
 
       const decisionIA = await consultarGeminiInteligente(
-        textoMensaje,
+        textoCrudo,
         nombreOperador,
         frenteNombre,
         memoria.datos || {},
@@ -216,7 +235,7 @@ export async function POST(req: Request) {
           ensanche: d.ensanche || 0,
           encamisado: d.encamisado || 0,
           ensayos_spt: d.ensayos_spt || 0,
-          observaciones: d.observaciones || textoMensaje,
+          observaciones: d.observaciones || textoCrudo,
           confirmado: true
         })
 
@@ -248,7 +267,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ status: 'ok' })
   } catch (err: any) {
-    console.error('Error procesando webhook:', err)
+    console.error('❌ Error general en Webhook:', err)
     return NextResponse.json({ error: err.message }, { status: 500 })
   }
 }
@@ -263,47 +282,24 @@ async function consultarGeminiInteligente(
   const modelos = ['gemini-flash-latest', 'gemini-3.7-flash', 'gemini-3.5-flash']
 
   const prompt = `
-Eres el Asistente de Operaciones de "JHF Perforaciones S.A.S.", empresa colombiana líder en geotecnia, sondeos y pilotaje.
-Estás hablando por WhatsApp con "Don ${operador}" en el frente de obra "${frente}".
-Tu tono es humano, cálido, respetuoso y con chispa colombiana de campo ("Don ${operador}", "mano", "listo el pollo", "fresco", "hágale").
+Eres el Asistente de Operaciones de "JHF Perforaciones S.A.S." en Colombia.
+Hablas con "Don ${operador}" en el frente "${frente}". Tono humano, cercano, respetuoso de obra ("Don ${operador}", "mano", "listo").
 
-INFORMACIÓN TÉCNICA ACUMULADA HASTA AHORA:
-${JSON.stringify(datosPrevios, null, 2)}
+DATOS TÉCNICOS PREVIOS: ${JSON.stringify(datosPrevios)}
+HISTORIAL:
+${historial.map(h => `${h.role}:${h.text}`).join('\n')}
+ÚLTIMO MENSAJE: "${mensaje}"
 
-HISTORIAL DE LA CONVERSACIÓN RECIENTE:
-${historial.map(h => `${h.role === 'user' ? 'Operador' : 'Asistente JHF'}:${h.text}`).join('\n')}
+REGLAS:
+1. Si no sabe el pilote ("no sé en cuál estoy", "me toca preguntar"), pon "Pilote: Por verificar" o "P-01 (Provisional)" y pide confirmación sin pelear ni inventar sondeos.
+2. Si confirma ("si", "ok", "listo", "de una"), accion: "guardar_reporte".
+3. Si dice bromas, responde con chispa y pídele en serio los datos de la obra.
+4. "prehueco" o "PQ" = avance pq (pilote).
 
-ÚLTIMO MENSAJE DEL OPERADOR:
-"${mensaje}"
-
-REGLAS DE INTELIGENCIA CONVERSACIONAL:
-1. SI CORRIGE O ACLARA UN DATO (ej: "pero yo no estoy en el p1, no sé en cuál estoy"):
-   - Entiende el contexto: sabe que sigue en Pilotaje y que tiene los metros de prehueco/PQ.
-   - Si no sabe el pilote, pon "Pilote: Por verificar" o "P-01 (Provisional)".
-   - Responde con tranquilidad y pídele confirmar.
-   - accion: "pedir_confirmacion".
-
-2. SI EL OPERADOR CONFIRMA (ej: "si", "mm Si", "listo", "ok", "correcto", "de una"):
-   - accion: "guardar_reporte".
-
-3. SI DICE BROMAS O TEMAS AJENOS (ej: "sexo", "o se maria la loca", "hagmos el amor..."):
-   - Responde con humor ligero y pídele en serio los datos de trabajo.
-   - accion: "conversar".
-
-4. SI SE DESPIDE O DICE GRACIAS:
-   - Deséale feliz noche sin crear reportes.
-   - accion: "conversar".
-
-5. REGLAS TÉCNICAS:
-   - "prehueco" o "PQ" = avance en Preperforación PQ de pilote (tipo: "pilote").
-   - "cuchara partida" o "SPT" = ensayos SPT (tipo: "estudio_suelo").
-   - "lluvia", "varada de máquina", "parada por SST" = novedades operativas reales.
-   - En "observaciones" pon únicamente hechos técnicos (ej: "Labores detenidas por SST"). Nunca pongas comentarios informales como "me toca preguntar ome".
-
-Devuelve ÚNICAMENTE un JSON válido:
+Devuelve ÚNICAMENTE un JSON:
 {
   "accion": "conversar" | "pedir_confirmacion" | "guardar_reporte",
-  "respuesta_whatsapp": "Texto que se enviará al operador",
+  "respuesta_whatsapp": "Texto para WhatsApp",
   "datos_actualizados": {
     "tipo": "estudio_suelo" | "pilote" | "standby" | "logistica",
     "sondeo": string | null,
@@ -319,7 +315,6 @@ Devuelve ÚNICAMENTE un JSON válido:
 
   for (const modelo of modelos) {
     if (!GEMINI_API_KEY) break
-
     try {
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${GEMINI_API_KEY}`, {
         method: 'POST',
@@ -408,20 +403,37 @@ function esDespedidaOInterjeccion(limpio: string): boolean {
 }
 
 async function enviarWhatsApp(to: string, text: string) {
-  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) return
-
-  await fetch(`[https://graph.facebook.com/v19.0/$](https://graph.facebook.com/v19.0/$){PHONE_NUMBER_ID}/messages`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to,
-      type: 'text',
-      text: { body: text }
+  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
+    console.error('❌ Credenciales incompletas para enviar WhatsApp:', {
+      hasToken: Boolean(WHATSAPP_TOKEN),
+      hasPhoneId: Boolean(PHONE_NUMBER_ID)
     })
-  })
+    return
+  }
+
+  try {
+    const res = await fetch(`[https://graph.facebook.com/v19.0/$](https://graph.facebook.com/v19.0/$){PHONE_NUMBER_ID}/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to,
+        type: 'text',
+        text: { body: text }
+      })
+    })
+
+    if (!res.ok) {
+      const errText = await res.text()
+      console.error(`❌ Meta API rechazó el mensaje (${res.status}):`, errText)
+    } else {
+      console.log(`📤 Mensaje entregado a Meta con éxito para: ${to}`)
+    }
+  } catch (err: any) {
+    console.error('❌ Excepción de red enviando a Meta Graph API:', err.message)
+  }
 }
