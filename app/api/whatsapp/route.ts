@@ -95,7 +95,7 @@ export async function POST(req: Request) {
     if (message.type === 'audio' || message.type === 'voice') {
       await enviarWhatsApp(
         from,
-        `👋 Hola ${trabajador.nombre}, este sistema automatizado no escucha audios. Por favor escríbeme en un mensaje corto cómo les fue hoy.`
+        `👋 Hola ${trabajador.nombre}, este sistema automatizado no escucha audios. Por favor escríbeme en un texto corto cómo les fue hoy.`
       )
       return NextResponse.json({ status: 'audio_rejected' })
     }
@@ -116,11 +116,7 @@ export async function POST(req: Request) {
       const nombreOperador = trabajador.nombre
       const frenteNombre = trabajador.proyectos?.nombre || 'General'
 
-      // ==========================================
-      // 1. REGLAS DETERMINISTAS INMEDIATAS
-      // ==========================================
-
-      // Cancelar / reiniciar en cualquier momento
+      // 1. REINICIAR / CANCELAR
       if (/\b(cancelar|anular|borrar|reiniciar|empezar de nuevo|borre eso)\b/i.test(textoNormalizado)) {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'esperando_reporte_diario',
@@ -134,7 +130,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'cancelled' })
       }
 
-      // Confirmación estricta cuando espera confirmación
+      // 2. CONFIRMACIÓN POSITIVA ("SÍ", "OK", "CONFIRMO")
       if (estadoActual === 'esperando_confirmacion' && esConfirmacionPositiva(textoNormalizado)) {
         const b = canastaPrevia
 
@@ -167,7 +163,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'saved' })
       }
 
-      // Rechazo o corrección cuando espera confirmación
+      // 3. CONFIRMACIÓN NEGATIVA
       if (estadoActual === 'esperando_confirmacion' && esNegacionSimple(textoNormalizado)) {
         await supabase.from('trabajadores').update({
           estado_conversacion: 'esperando_reporte_diario',
@@ -181,7 +177,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'confirmation_rejected' })
       }
 
-      // Cortesías y despedidas
+      // 4. DESPEDIDAS Y CORTESÍAS
       if (esDespedidaOCortesia(textoNormalizado)) {
         if (estadoActual === 'esperando_confirmacion') {
           await supabase.from('trabajadores').update({
@@ -197,7 +193,17 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'courtesy_replied' })
       }
 
-      // Saludos simples
+      // 5. BROMAS O VULGARIDADES (Si no vienen acompañadas de metros reales)
+      const tieneMetrosEnBruto = /\b(\d+|un|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s*(?:m|mt|mts|metro|pq|prehueco)/i.test(textoNormalizado)
+      if (esBromaOGroseria(textoNormalizado) && !tieneMetrosEnBruto) {
+        await enviarWhatsApp(
+          from,
+          `😅 Don ${nombreOperador}, déjese de bromas y hablemos de trabajo: ¿cuántos metros perforaron hoy en *${frenteNombre}* o qué novedades tuvieron?`
+        )
+        return NextResponse.json({ status: 'joke_filtered' })
+      }
+
+      // 6. SALUDOS SIMPLES
       if (esSaludoSimple(textoNormalizado)) {
         if (estadoActual === 'inactivo') {
           await enviarWhatsApp(
@@ -213,64 +219,64 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'greeting_replied' })
       }
 
-      // ==========================================
-      // 2. PROCESAMIENTO SEMÁNTICO (GEMINI IA)
-      // ==========================================
-      const ai = await analizarConGemini(textoCrudo, nombreOperador, frenteNombre, estadoActual, canastaPrevia)
+      // ====================================================
+      // 7. EXTRACCIÓN HÍBRIDA (GEMINI IA + MOTOR LOCAL)
+      // ====================================================
+      let extraccion = await analizarConGemini(textoCrudo, nombreOperador, frenteNombre, canastaPrevia)
 
-      if (ai.categoria === 'broma_o_sin_sentido') {
-        await enviarWhatsApp(
-          from,
-          ai.mensaje_al_operador || `😅 ¡Epa ${nombreOperador}! Por favor cuéntame en serio cómo les fue hoy en *${frenteNombre}*: ¿cuántos metros perforaron o qué actividades hicieron?`
-        )
-        return NextResponse.json({ status: 'joke_handled' })
+      if (!extraccion || !extraccion.valido) {
+        extraccion = analizarMotorLocal(textoCrudo, canastaPrevia)
       }
 
-      if (ai.falta_dato && !canastaPrevia.ya_pregunto && estadoActual !== 'esperando_datos_faltantes') {
-        const nuevaCanasta = { ...canastaPrevia, ...ai.datos_extraidos, ya_pregunto: true }
-
-        await supabase.from('trabajadores').update({
-          estado_conversacion: 'esperando_datos_faltantes',
-          borrador_reporte: nuevaCanasta
-        }).eq('id', trabajador.id)
-
-        await enviarWhatsApp(from, ai.mensaje_al_operador)
-        return NextResponse.json({ status: 'asking_missing_data' })
+      // Si el operario no sabe el número de punto, se le asigna P-01 o S-01
+      if (/no\s*(?:me\s*)?se\s*(?:el\s*)?(?:nombre|numero|nro|sondeo|pilote|punto)|me\s*tocaria\s*preguntar/i.test(textoNormalizado)) {
+        if (extraccion.tipo === 'pilote' || extraccion.pq || extraccion.ensanche) {
+          extraccion.pilote = extraccion.pilote || 'P-01'
+        } else {
+          extraccion.sondeo = extraccion.sondeo || 'S-01'
+        }
       }
 
-      // Si no hay datos técnicos y no es un reporte válido
-      const tieneMetros = (ai.datos_extraidos?.metros !== null && ai.datos_extraidos?.metros !== undefined) || (ai.datos_extraidos?.pq || 0) > 0
-      const tienePunto = Boolean(ai.datos_extraidos?.sondeo || ai.datos_extraidos?.pilote)
-      const esNovedad = ai.categoria === 'novedad_operativa' || ai.datos_extraidos?.tipo === 'standby' || ai.datos_extraidos?.tipo === 'logistica'
+      const tieneMetraje = (extraccion.metros !== null && extraccion.metros !== undefined && extraccion.metros > 0) ||
+                           (extraccion.pq !== null && extraccion.pq !== undefined && extraccion.pq > 0) ||
+                           (extraccion.ensanche !== null && extraccion.ensanche !== undefined && extraccion.ensanche > 0)
+      const tienePunto = Boolean(extraccion.sondeo || extraccion.pilote)
+      const esStandby = extraccion.tipo === 'standby' || extraccion.tipo === 'logistica'
 
-      if (!tieneMetros && !tienePunto && !esNovedad && !canastaPrevia.ya_pregunto) {
+      if (!tieneMetraje && !tienePunto && !esStandby && !canastaPrevia.ya_pregunto) {
         await enviarWhatsApp(
           from,
-          `👋 Don ${nombreOperador}, no alcancé a captar los metros ni el sondeo. Por favor indícame en qué punto estuvieron y cuántos metros avanzaron hoy en *${frenteNombre}*.`
+          `👋 Don ${nombreOperador}, no alcancé a captar los metros ni el punto de trabajo. Por favor indícame cuántos metros avanzaron hoy o qué novedad tuvieron en *${frenteNombre}*.`
         )
         return NextResponse.json({ status: 'unclear_message' })
       }
 
-      // ==========================================
-      // 3. GENERAR FICHA Y PEDIR CONFIRMACIÓN
-      // ==========================================
+      // ====================================================
+      // 8. GENERAR FICHA RESUMEN Y SOLICITAR CONFIRMACIÓN
+      // ====================================================
       const datosFinales: CanastaReporte = {
         ...canastaPrevia,
-        ...ai.datos_extraidos,
+        ...extraccion,
         detalle: canastaPrevia.detalle ? `${canastaPrevia.detalle} -${textoCrudo}` : textoCrudo
       }
 
       let resumen = ''
-      if (datosFinales.tipo === 'pilote') {
+      if (datosFinales.tipo === 'pilote' || datosFinales.pq || datosFinales.ensanche || datosFinales.pilote) {
+        datosFinales.tipo = 'pilote'
+        const piloteFinal = datosFinales.pilote || 'P-01'
+        const pqFinal = datosFinales.pq ?? datosFinales.metros ?? 0
+        const ensFinal = datosFinales.ensanche || 0
+        const encFinal = datosFinales.encamisado || 0
+
         resumen =
           `👷 *Operador:* ${nombreOperador}\n` +
           `📍 *Frente:* ${frenteNombre}\n` +
           `• *Actividad:* PILOTAJE\n` +
-          `• *Pilote:* ${datosFinales.pilote || 'P-01'}\n` +
-          `• *Preperforación (PQ):* ${datosFinales.pq ?? datosFinales.metros ?? 0} m\n` +
-          `• *Ensanche:* ${datosFinales.ensanche || 0} m\n` +
-          `• *Encamisado:* ${datosFinales.encamisado || 0} m\n` +
-          `• *Detalle:* ${datosFinales.detalle}`
+          `• *Pilote:* ${piloteFinal}\n` +
+          `• *Preperforación (PQ):* ${pqFinal} m\n` +
+          `• *Ensanche:* ${ensFinal} m\n` +
+          `• *Encamisado:* ${encFinal} m\n` +
+          `• *Detalle / Novedad:* ${datosFinales.detalle}`
       } else if (datosFinales.tipo === 'standby' || datosFinales.tipo === 'logistica') {
         resumen =
           `👷 *Operador:* ${nombreOperador}\n` +
@@ -278,19 +284,22 @@ export async function POST(req: Request) {
           `• *Actividad:* ${datosFinales.tipo === 'standby' ? 'NOVEDAD / STANDBY' : 'LOGÍSTICA DE CAMPO'}\n` +
           `• *Detalle:* ${datosFinales.detalle}`
       } else {
+        datosFinales.tipo = 'estudio_suelo'
+        const sondeoFinal = datosFinales.sondeo || 'S-01'
+        const metrosFinal = datosFinales.metros ?? 0
         const tramo = (datosFinales.tramo_inicio !== null && datosFinales.tramo_inicio !== undefined && datosFinales.tramo_fin !== null && datosFinales.tramo_fin !== undefined)
           ? ` (De ${datosFinales.tramo_inicio} m a${datosFinales.tramo_fin} m)`
           : ''
         const spt = datosFinales.ensayos_spt ? `\n• *Ensayos SPT:* ${datosFinales.ensayos_spt}` : ''
         const shelby = datosFinales.muestras_shelby ? `\n• *Muestras Shelby:* ${datosFinales.muestras_shelby}` : ''
-        const rec = datosFinales.recobro ? `\n• *Recobro / Muestra:* ${datosFinales.recobro}` : ''
+        const rec = datosFinales.recobro ? `\n• *Recobro:* ${datosFinales.recobro}` : ''
 
         resumen =
           `👷 *Operador:* ${nombreOperador}\n` +
           `📍 *Frente:* ${frenteNombre}\n` +
           `• *Actividad:* ESTUDIO DE SUELOS / GEOTECNIA\n` +
-          `• *Sondeo / Punto:* ${datosFinales.sondeo || 'S-01'}\n` +
-          `• *Avance Perforado:* ${datosFinales.metros ?? 0} m${tramo}${spt}${shelby}${rec}\n` +
+          `• *Sondeo / Punto:* ${sondeoFinal}\n` +
+          `• *Avance Perforado:* ${metrosFinal} m${tramo}${spt}${shelby}${rec}\n` +
           `• *Observaciones:* ${datosFinales.detalle}`
       }
 
@@ -318,6 +327,133 @@ export async function POST(req: Request) {
   }
 }
 
+// MOTOR LOCAL DE PARSEO TÉCNICO Y CONVERSIÓN DE TEXTO A DÍGITOS
+function analizarMotorLocal(raw: string, previo: CanastaReporte): any {
+  let t = normalizarTexto(raw)
+
+  // Conversión de números escritos en palabras a dígitos
+  const mapaNumeros: Record<string, string> = {
+    'cero': '0', 'un': '1', 'uno': '1', 'una': '1', 'dos': '2', 'dosss': '2', 'doss': '2',
+    'tres': '3', 'tress': '3', 'cuatro': '4', 'cinco': '5', 'seis': '6', 'siete': '7',
+    'ocho': '8', 'nueve': '9', 'diez': '10', 'once': '11', 'doce': '12', 'quince': '15',
+    'veinte': '20'
+  }
+  for (const [palabra, digito] of Object.entries(mapaNumeros)) {
+    t = t.replace(new RegExp(`\\b${palabra}\\b`, 'g'), digito)
+  }
+  t = t.replace(/\bmedio\s*(?:metro|m)\b/g, '0.5 metros')
+
+  const c: any = { ...previo, valido: false }
+
+  const mencionaPilote = /\b(pilote|pilotaje|pq|prehueco|pre hueco|ensanche|encamisado|casing)\b/i.test(t) || /\bp[-_\s]*0*\d+\b/i.test(t)
+  const mencionaLluvia = /\b(lluvia|llovio|aguacero|clima|agua paramos|inundado)\b/i.test(t)
+  const mencionaVarada = /\b(varad|dano|falla|revento|rompio|manguera|bomba|acpm|combustible|sst|interventoria|pararon|paro)\b/i.test(t)
+
+  if (mencionaPilote) c.tipo = 'pilote'
+  else if (mencionaLluvia || mencionaVarada) c.tipo = 'standby'
+  else c.tipo = c.tipo || 'estudio_suelo'
+
+  // Sondeos
+  const mSondeo = t.match(/\b(?:sondeo|punto|pozo|sp|s)[-_\s]*0*(\d+)\b/i)
+  if (mSondeo) { c.sondeo = `S-${mSondeo[1].padStart(2, '0')}`; c.tipo = 'estudio_suelo'; c.valido = true }
+
+  // Pilotes
+  const mPilote = t.match(/\b(?:pilote|p)[-_\s]*0*(\d+)\b/i)
+  if (mPilote) { c.pilote = `P-${mPilote[1].padStart(2, '0')}`; c.tipo = 'pilote'; c.valido = true }
+
+  // Tramos: "de 2 a 6 metros"
+  const mTramo = t.match(/(?:de|desde)\s*(\d+(?:\.\d+)?)\s*(?:a|hasta)\s*(\d+(?:\.\d+)?)/i)
+  if (mTramo) {
+    const ini = parseFloat(mTramo[1])
+    const fin = parseFloat(mTramo[2])
+    if (fin > ini) {
+      c.tramo_inicio = ini
+      c.tramo_fin = fin
+      c.metros = parseFloat((fin - ini).toFixed(2))
+      c.valido = true
+    }
+  }
+
+  // Prehueco / PQ
+  const mPQ = t.match(/(\d+(?:\.\d+)?)\s*(?:metros?\s*)?(?:en|de)?\s*(?:pq|prehueco|pre hueco)/i) ||
+              t.match(/(?:pq|prehueco|pre hueco)\s*(?:de)?\s*(\d+(?:\.\d+)?)/i)
+  if (mPQ) {
+    c.pq = parseFloat(mPQ[1])
+    c.tipo = 'pilote'
+    c.valido = true
+  }
+
+  // Metros sueltos o explícitos ("2 metros", "dos metros mano", "avance 3")
+  const mMetros = t.match(/(\d+(?:\.\d+)?)\s*(?:metros?|m\b)/i) ||
+                  t.match(/\b(?:hice|perfore|avanzamos|hicimos|hicieron|avance)\s*(\d+(?:\.\d+)?)/i)
+  if (mMetros && !c.metros && !c.pq) {
+    const val = parseFloat(mMetros[1])
+    if (c.tipo === 'pilote') c.pq = val
+    else c.metros = val
+    c.valido = true
+  }
+
+  // SPT y Shelby
+  const mSPT = t.match(/(\d+)\s*(?:ensayos?|muestras?)?\s*spt/i) || t.match(/\bspt\b/i)
+  if (mSPT) { c.ensayos_spt = mSPT[1] ? parseInt(mSPT[1]) : 1; c.valido = true }
+
+  if (mencionaLluvia || mencionaVarada) c.valido = true
+
+  return c
+}
+
+// LLAMADA A GEMINI CON ENDPOINT OFICIAL ESTABLE V1
+async function analizarConGemini(mensaje: string, operador: string, frente: string, memoria: CanastaReporte): Promise<any> {
+  if (!GEMINI_API_KEY) return { valido: false }
+
+  const prompt = `
+Analiza el reporte de un perforador de "JHF Perforaciones S.A.S." en Colombia:
+Operador: "${operador}", Frente: "${frente}", Mensaje: "${mensaje}", Memoria previa: ${JSON.stringify(memoria)}.
+
+Devuelve ÚNICAMENTE un JSON:
+{
+  "valido": true,
+  "tipo": "estudio_suelo" | "pilote" | "standby" | "logistica",
+  "sondeo": string | null,
+  "pilote": string | null,
+  "metros": number | null,
+  "tramo_inicio": number | null,
+  "tramo_fin": number | null,
+  "pq": number | null,
+  "ensanche": number | null,
+  "ensayos_spt": number | null,
+  "recobro": string | null
+}
+Si el mensaje no contiene datos de metros, avances ni novedades operativas de obra, devuelve {"valido": false}.
+`
+
+  try {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 2500) // Máximo 2.5 seg
+
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { responseMimeType: 'application/json', temperature: 0.1 }
+      }),
+      signal: controller.signal
+    })
+    clearTimeout(timeoutId)
+
+    if (res.ok) {
+      const data = await res.json()
+      const rawJson = data.candidates?.[0]?.content?.parts?.[0]?.text
+      if (rawJson) return JSON.parse(rawJson)
+    }
+  } catch (e) {
+    // Si Gemini tarda o falla, deriva silenciosamente al motor local
+  }
+
+  return { valido: false }
+}
+
 function normalizarTexto(t: string): string {
   return t
     .normalize('NFD')
@@ -325,6 +461,14 @@ function normalizarTexto(t: string): string {
     .toLowerCase()
     .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '')
     .trim()
+}
+
+function esBromaOGroseria(limpio: string): boolean {
+  const palabras = [
+    'sexo', 'setso', 'ganzo', 'ganso', 'huevos', 'guevas', 'madre', 'chimba',
+    'verga', 'mierda', 'puta', 'gonorrea', 'culiar', 'chiste', 'marica', 'loca', 'loco'
+  ]
+  return palabras.some(p => limpio.includes(p))
 }
 
 function esConfirmacionPositiva(limpio: string): boolean {
@@ -362,95 +506,6 @@ function esSaludoSimple(limpio: string): boolean {
     'q tal', 'que tal', 'como estan', 'como esta', 'como vamos'
   ]
   return saludos.includes(limpio)
-}
-
-async function analizarConGemini(
-  mensaje: string,
-  operador: string,
-  frente: string,
-  estado: string,
-  memoria: CanastaReporte
-) {
-  if (!GEMINI_API_KEY) {
-    console.warn('⚠️ GEMINI_API_KEY no configurada en Vercel')
-    return {
-      categoria: 'desconocido',
-      falta_dato: null,
-      mensaje_al_operador: '',
-      datos_extraidos: null
-    }
-  }
-
-  const prompt = `
-Eres el analista de operaciones de "JHF Perforaciones S.A.S." en Colombia.
-Tu labor es interpretar los mensajes de WhatsApp enviados por perforadores y operarios de campo en obras de geotecnia, sondeos y pilotaje.
-
-Contexto:
-- Operador: "${operador}"
-- Frente de obra: "${frente}"
-- Estado: "${estado}"
-- Memoria previa: ${JSON.stringify(memoria)}
-- Mensaje nuevo: "${mensaje}"
-
-Clasifica el mensaje en UNA de estas categorías:
-1. "broma_o_sin_sentido": Vulgaridades, groserías, chistes o temas personales ajenos a la obra (ej: "me jale el ganzo", "me rasqué...", sexo, fiesta).
-2. "novedad_operativa": Lluvia, varada mecánica, falta de combustible, trasteo, armado de equipo, paralización por SST o interventoría.
-3. "reporte_avance": Avances reales en metros, sondeos, pilotes, SPT, muestras Shelby o recobros.
-4. "desconocido": Cualquier texto que no aporte información técnica verificable.
-
-Reglas de extracción:
-- Sondeos: S-01, S-02, etc.
-- Pilotes: P-01, P-02, etc. Prehueco = preperforación PQ (metros en pq).
-- Si es una broma, escribe en "mensaje_al_operador" una respuesta profesional con humor que le pida el avance real de la obra.
-
-Responde ÚNICAMENTE en JSON:
-{
-  "categoria": "broma_o_sin_sentido" | "novedad_operativa" | "reporte_avance" | "desconocido",
-  "falta_dato": null | "metros" | "sondeo" | "pilote",
-  "mensaje_al_operador": "Texto de respuesta si es broma o falta dato",
-  "datos_extraidos": {
-    "tipo": "estudio_suelo" | "pilote" | "standby" | "logistica",
-    "sondeo": string | null,
-    "pilote": string | null,
-    "metros": number | null,
-    "tramo_inicio": number | null,
-    "tramo_fin": number | null,
-    "ensayos_spt": number | null,
-    "muestras_shelby": number | null,
-    "recobro": string | null,
-    "pq": number | null,
-    "ensanche": number | null,
-    "encamisado": number | null
-  }
-}
-`
-
-  try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.1 }
-      })
-    })
-
-    if (!res.ok) {
-      const errText = await res.text()
-      console.error(`❌ Error en respuesta de Gemini API (${res.status}):`, errText)
-      return { categoria: 'desconocido', falta_dato: null, mensaje_al_operador: '', datos_extraidos: null }
-    }
-
-    const data = await res.json()
-    const rawJson = data.candidates?.[0]?.content?.parts?.[0]?.text
-    if (rawJson) {
-      return JSON.parse(rawJson)
-    }
-  } catch (err) {
-    console.error('Fallo en fetch a Gemini:', err)
-  }
-
-  return { categoria: 'desconocido', falta_dato: null, mensaje_al_operador: '', datos_extraidos: null }
 }
 
 async function enviarWhatsApp(to: string, text: string) {
