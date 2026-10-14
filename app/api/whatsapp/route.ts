@@ -86,6 +86,26 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'image_received' })
     }
 
+    // DETECTAR CLIC EN BOTÓN DE PLANTILLA ("Confirmar recepción")
+    if (message.type === 'button' || message.type === 'interactive') {
+      const botonTexto = message.button?.text || message.interactive?.button_reply?.title || ''
+      const nombreOperador = trabajador.nombre
+      const frenteNombre = trabajador.proyectos?.nombre || 'General'
+
+      await supabase.from('trabajadores').update({
+        estado_conversacion: 'esperando_reporte_diario',
+        borrador_reporte: null
+      }).eq('id', trabajador.id)
+
+      await enviarWhatsApp(
+        from,
+        `👋 ¡Hola ${nombreOperador}! Te saluda el Sistema de Control Operativo de *JHF Perforaciones S.A.S.*\n\n` +
+        `¿Cómo les fue hoy en *${frenteNombre}*?\n\n` +
+        `Por favor cuéntame en qué punto trabajaron (sondeo o pilote), cuántos metros avanzaron o si tuvieron alguna novedad (lluvia, trasteo o varada).`
+      )
+      return NextResponse.json({ status: 'button_welcome_sent' })
+    }
+
     if (message.type === 'text') {
       const textoCrudo = message.text?.body?.trim() || ''
       const textoLimpio = quitarTildes(textoCrudo.toLowerCase())
