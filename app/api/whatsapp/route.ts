@@ -1,14 +1,9 @@
 import { NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
 
-const META_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'clave_secreta_reportes_2026'
-
-// Blindaje contra variables con sintaxis ${...} o comillas accidentales
-const rawPhoneId = (process.env.WHATSAPP_PHONE_ID || '').replace(/['"]/g, '').trim()
-const PHONE_NUMBER_ID = (rawPhoneId && !rawPhoneId.includes('$')) ? rawPhoneId : '1370874296109664'
-
-const rawToken = (process.env.WHATSAPP_ACCESS_TOKEN || '').replace(/['"]/g, '').trim()
-const WHATSAPP_TOKEN = rawToken
+const META_VERIFY_TOKEN = 'clave_secreta_reportes_2026'
+// ID oficial fijo de JHF Perforaciones para garantizar la URL de Meta
+const PHONE_NUMBER_ID = '1370874296109664'
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ''
 
@@ -40,11 +35,14 @@ interface MemoriaConversacion {
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
   const mode = searchParams.get('hub.mode')
-  const token = searchParams.get('hub.verify_token')
+  const token = (searchParams.get('hub.verify_token') || '').trim()
   const challenge = searchParams.get('hub.challenge')
 
-  if (mode === 'subscribe' && token === META_VERIFY_TOKEN) {
-    return new Response(challenge, { status: 200 })
+  if (mode === 'subscribe' && (token === META_VERIFY_TOKEN || token === (process.env.WHATSAPP_VERIFY_TOKEN || '').trim())) {
+    return new Response(challenge, {
+      status: 200,
+      headers: { 'Content-Type': 'text/plain' }
+    })
   }
   return new Response('Token no coincide', { status: 403 })
 }
@@ -80,7 +78,7 @@ export async function POST(req: Request) {
     const trabajador = trabajadores?.[0]
 
     if (!trabajador) {
-      console.warn(`⚠️ Teléfono no registrado en BD: cleanTo=${cleanTo}, local=${localPhone}`)
+      console.warn(`⚠️ Teléfono no registrado: cleanTo=${cleanTo}, local=${localPhone}`)
       await enviarWhatsApp(
         from,
         '⚠️ Este número no se encuentra registrado como personal operativo activo en el sistema de JHF Perforaciones.'
@@ -291,9 +289,9 @@ ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
 ÚLTIMO MENSAJE: "${mensaje}"
 
 REGLAS:
-1. Si no sabe el pilote ("no sé en cuál estoy", "me toca preguntar"), pon "Pilote: Por verificar" o "P-01 (Provisional)" y pide confirmación sin pelear ni inventar sondeos.
+1. Si no sabe el pilote o sondeo ("no sé en cuál estoy", "me toca preguntar"), pon "P-01 (Por verificar)" y pide confirmación sin pelear ni inventar datos.
 2. Si confirma ("si", "ok", "listo", "de una"), accion: "guardar_reporte".
-3. Si dice bromas, responde con chispa y pídele en serio los datos de la obra.
+3. Si dice bromas ("me jale el gansito", "crack", chistes), responde con humor de obra y pídele con respeto los datos reales de metros y avances.
 4. "prehueco" o "PQ" = avance pq (pilote).
 
 Devuelve ÚNICAMENTE un JSON:
@@ -371,7 +369,7 @@ function respaldoContextual(
   return {
     accion: 'pedir_confirmacion',
     respuesta_whatsapp:
-      `¡Tranquilo Don ${operador}! Dejamos el punto como *${punto}* con sus${pq || metros} m y la novedad de SST.\n\n` +
+      `¡Tranquilo Don ${operador}! Dejamos el punto como *${punto}* con sus${pq || metros} m y la novedad.\n\n` +
       `¿Le parece bien para guardarlo en bitácora? Responda *SÍ* para confirmar.`,
     datos_actualizados: {
       tipo: tipoCalculado,
@@ -403,21 +401,21 @@ function esDespedidaOInterjeccion(limpio: string): boolean {
 }
 
 async function enviarWhatsApp(to: string, text: string) {
-  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
-    console.error('❌ Credenciales incompletas para enviar WhatsApp:', {
-      hasToken: Boolean(WHATSAPP_TOKEN),
-      phoneId: PHONE_NUMBER_ID
-    })
+  const token = (process.env.WHATSAPP_ACCESS_TOKEN || '').replace(/['"]/g, '').trim()
+  
+  if (!token) {
+    console.error('❌ Falta WHATSAPP_ACCESS_TOKEN en las variables de Vercel')
     return
   }
 
-  const url = `[https://graph.facebook.com/v19.0/$](https://graph.facebook.com/v19.0/$){PHONE_NUMBER_ID}/messages`
+  // URL directa con Phone ID fijo de JHF Perforaciones
+  const url = '[https://graph.facebook.com/v19.0/](https://graph.facebook.com/v19.0/)' + PHONE_NUMBER_ID + '/messages'
 
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+        'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
