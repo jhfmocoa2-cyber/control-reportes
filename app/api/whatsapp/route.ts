@@ -177,31 +177,49 @@ Responde SOLO con JSON:
 }
 `
 
-  // Nombres de modelos certificados para llaves AQ. y respaldo PRO por si hay congestión (503)
-  const modelos = ['gemini-1.5-flash-latest', 'gemini-1.5-pro-latest', 'gemini-flash-latest']
+  // 1. gemini-flash-latest (El que sabemos que sí funciona, le haremos reintentos si da 503)
+  // 2. gemini-pro (El modelo clásico 1.0 súper estable, como plan de contingencia)
+  const modelos = ['gemini-flash-latest', 'gemini-pro']
   let logErrores = []
 
   for (const modelo of modelos) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${geminiKey}`
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } })
-      })
+    let intentos = 0;
+    const maxIntentos = modelo === 'gemini-flash-latest' ? 3 : 1; // Le rogamos 3 veces a flash
 
-      if (res.ok) {
-        const data = await res.json()
-        if (data.candidates?.[0]?.finishReason === 'SAFETY') return { accion: 'conversar', respuesta_whatsapp: `Don ${operador}, enfoquémonos en el reporte técnico.`, datos_actualizados: { ...datosPrevios } }
-        let raw = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
-        raw = raw.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim()
-        if (raw) return { accion: JSON.parse(raw).accion || 'conversar', respuesta_whatsapp: JSON.parse(raw).respuesta_whatsapp || '', datos_actualizados: (JSON.parse(raw).datos_actualizados || {}) as DatosReporte }
-      } else {
-        const data = await res.json()
-        logErrores.push(`[${modelo}:${data.error?.status || res.status}]`)
+    while (intentos < maxIntentos) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${geminiKey}`
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } })
+        })
+
+        if (res.ok) {
+          const data = await res.json()
+          if (data.candidates?.[0]?.finishReason === 'SAFETY') return { accion: 'conversar', respuesta_whatsapp: `Don ${operador}, enfoquémonos en el reporte técnico.`, datos_actualizados: { ...datosPrevios } }
+          let raw = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+          raw = raw.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim()
+          if (raw) return { accion: JSON.parse(raw).accion || 'conversar', respuesta_whatsapp: JSON.parse(raw).respuesta_whatsapp || '', datos_actualizados: (JSON.parse(raw).datos_actualizados || {}) as DatosReporte }
+        } else {
+          const data = await res.json()
+          
+          // Si da 503 (Servidor ocupado), esperamos 1.5 segundos y volvemos a intentar
+          if (res.status === 503) {
+            intentos++;
+            if (intentos < maxIntentos) {
+              await new Promise(resolve => setTimeout(resolve, 1500)); 
+              continue; // Salta al siguiente intento en el ciclo while
+            }
+          }
+          
+          logErrores.push(`[${modelo}:${data.error?.status || res.status}]`)
+          break; // Rompe el ciclo while para pasar al siguiente modelo de la lista
+        }
+      } catch (e: any) {
+        logErrores.push(`[${modelo}: error_red]`)
+        break; // Rompe el ciclo while
       }
-    } catch (e: any) {
-      logErrores.push(`[${modelo}: error_red]`)
     }
   }
 
