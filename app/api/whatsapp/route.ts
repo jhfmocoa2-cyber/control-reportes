@@ -177,8 +177,8 @@ Responde SOLO con JSON:
 }
 `
 
-  // Modelos oficiales (sin inventos)
-  const modelos = ['gemini-1.5-flash', 'gemini-1.5-flash-8b']
+  // Nombres de modelos certificados para llaves AQ. y respaldo PRO por si hay congestión (503)
+  const modelos = ['gemini-1.5-flash-latest', 'gemini-1.5-pro-latest', 'gemini-flash-latest']
   let logErrores = []
 
   for (const modelo of modelos) {
@@ -207,7 +207,7 @@ Responde SOLO con JSON:
 
   return {
     accion: 'conversar',
-    respuesta_whatsapp: `🛠️ *REPORTE TÉCNICO (Google Ocupado):* Fallaron los modelos: ${logErrores.join(', ')}. Intente enviar su mensaje en 1 minuto.`,
+    respuesta_whatsapp: `🛠️ *REPORTE TÉCNICO:* Fallaron los modelos: ${logErrores.join(', ')}. Intente de nuevo en 1 minuto.`,
     datos_actualizados: { ...datosPrevios }
   }
 }
