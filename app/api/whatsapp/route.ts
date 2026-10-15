@@ -4,29 +4,16 @@ import { supabase } from '@/lib/supabase'
 const META_VERIFY_TOKEN = 'clave_secreta_reportes_2026'
 const META_MESSAGES_URL = 'https://graph.facebook.com/v19.0/1370874296109664/messages'
 
-// Llave de Gemini reconstruida en pedazos para evitar bloqueos de GitHub y fallos de Vercel
-const K = ['AQ.Ab8RN', '6J23_jg9', 'LS2lfr0-', 'SIAjsT2w', 'EEyBLv0K', '4L7pACtE', 'smyTQ'].join('');
-
 type TipoOperacion = 'estudio_suelo' | 'pilote' | 'standby' | 'logistica'
 interface MensajeHistorial { role: string; text: string }
 
 interface DatosReporte {
-  tipo?: TipoOperacion
-  sondeo?: string | null
-  pilote?: string | null
-  metros?: number | null
-  pq?: number | null
-  ensanche?: number | null
-  encamisado?: number | null
-  ensayos_spt?: number | null
-  recobro?: string | null
-  observaciones?: string | null
+  tipo?: TipoOperacion; sondeo?: string | null; pilote?: string | null;
+  metros?: number | null; pq?: number | null; ensanche?: number | null;
+  encamisado?: number | null; ensayos_spt?: number | null; observaciones?: string | null;
 }
 
-interface MemoriaConversacion {
-  datos?: DatosReporte
-  historial?: MensajeHistorial[]
-}
+interface MemoriaConversacion { datos?: DatosReporte; historial?: MensajeHistorial[] }
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
@@ -43,8 +30,6 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const body = await req.json()
-    console.log('📩 WEBHOOK RECIBIDO:', JSON.stringify(body, null, 2))
-
     const entry = body.entry?.[0]
     const message = entry?.changes?.[0]?.value?.messages?.[0]
 
@@ -61,9 +46,8 @@ export async function POST(req: Request) {
       .eq('activo', true)
 
     const trabajador = trabajadores?.[0]
-
     if (!trabajador) {
-      await enviarWhatsApp(from, '⚠️ Este número no se encuentra registrado como personal operativo activo en JHF Perforaciones.')
+      await enviarWhatsApp(from, '⚠️ Este número no está registrado como personal operativo en JHF Perforaciones.')
       return NextResponse.json({ status: 'unregistered_user' })
     }
 
@@ -147,33 +131,16 @@ export async function POST(req: Request) {
 async function guardarOActualizarReporte(trabajador: any, d: DatosReporte, textoCrudo: string) {
   const hoy = new Date()
   hoy.setHours(0, 0, 0, 0)
+  const { data: existentes } = await supabase.from('reportes_operativos').select('id').eq('trabajador_id', trabajador.id).gte('created_at', hoy.toISOString()).order('created_at', { ascending: false }).limit(1)
 
-  const { data: existentes } = await supabase
-    .from('reportes_operativos')
-    .select('id')
-    .eq('trabajador_id', trabajador.id)
-    .gte('created_at', hoy.toISOString())
-    .order('created_at', { ascending: false })
-    .limit(1)
-
-  const tipoFinal: TipoOperacion =
-    d.tipo || (d.metros === 0 && d.observaciones ? 'standby' : d.pilote || d.pq || d.ensanche ? 'pilote' : 'estudio_suelo')
+  const tipoFinal: TipoOperacion = d.tipo || (d.metros === 0 && d.observaciones ? 'standby' : d.pilote || d.pq || d.ensanche ? 'pilote' : 'estudio_suelo')
 
   const payload = {
-    trabajador_id: trabajador.id,
-    proyecto_id: trabajador.proyecto_id,
-    trabajador_nombre: trabajador.nombre,
-    proyecto_nombre: trabajador.proyectos?.nombre || 'General',
-    tipo_operacion: tipoFinal,
-    sondeo: d.sondeo || null,
-    pilote: d.pilote || null,
-    metros_nq: d.metros || 0,
-    avance_pq: d.pq || 0,
-    ensanche: d.ensanche || 0,
-    encamisado: d.encamisado || 0,
-    ensayos_spt: d.ensayos_spt || 0,
-    observaciones: d.observaciones || textoCrudo,
-    confirmado: true
+    trabajador_id: trabajador.id, proyecto_id: trabajador.proyecto_id, trabajador_nombre: trabajador.nombre,
+    proyecto_nombre: trabajador.proyectos?.nombre || 'General', tipo_operacion: tipoFinal,
+    sondeo: d.sondeo || null, pilote: d.pilote || null, metros_nq: d.metros || 0,
+    avance_pq: d.pq || 0, ensanche: d.ensanche || 0, encamisado: d.encamisado || 0,
+    ensayos_spt: d.ensayos_spt || 0, observaciones: d.observaciones || textoCrudo, confirmado: true
   }
 
   if (existentes && existentes.length > 0) {
@@ -184,113 +151,74 @@ async function guardarOActualizarReporte(trabajador: any, d: DatosReporte, texto
 }
 
 async function consultarGeminiInteligente(mensaje: string, operador: string, frente: string, datosPrevios: DatosReporte, historial: MensajeHistorial[]) {
+  const geminiKey = (process.env.GEMINI_API_KEY || '').trim()
+  
+  if (!geminiKey) {
+    return { accion: 'conversar', respuesta_whatsapp: `🛠️ ERROR VERCEL: Llave ausente.`, datos_actualizados: { ...datosPrevios } }
+  }
+
   const prompt = `
-Eres el Asistente Técnico de Operaciones de "JHF Perforaciones S.A.S." en Colombia.
-Hablas con el operador "Don ${operador}" en el proyecto "${frente}".
-Tu tono debe ser profesional, respetuoso, empático y claro ("Don ${operador}", "listo", "comprendido").
-
-TU OBJETIVO: Recolectar la información diaria del frente de trabajo para la bitácora.
-
-DIRECTRICES:
-1. NOVEDADES Y STANDBY: Si reportan lluvia, daños o detenciones por SST sin avance, el registro debe ser: metros = 0, tipo = "standby".
-   Responde: "Comprendido Don ${operador}, lamento el inconveniente." y solicita confirmación.
-2. OPERACIONES: "Prehueco", "PQ" o "Ensanche" son Pilotaje. "Sondeo" es Estudio de Suelo.
-3. PUNTOS: Si no sabe el punto, asigna "P-01 (Por verificar)" o "S-01 (Por verificar)".
-4. CONFIRMACIÓN: Cuando la información esté completa, presenta un resumen y pide confirmación. Si confirma, acción = "guardar_reporte".
+Eres el Asistente Técnico de Operaciones de "JHF Perforaciones S.A.S." en Colombia. Hablas con "Don ${operador}".
+OBJETIVO: Recolectar la bitácora.
+1. NOVEDADES Y STANDBY: Si reportan lluvia, daños o paros SST sin avance: metros = 0, tipo = "standby". Responde: "Comprendido Don ${operador}, lamento el inconveniente." y solicita confirmación.
+2. OPERACIONES: "Prehueco/PQ/Ensanche" = pilote. "Sondeo" = estudio_suelo.
+3. PUNTOS: Si no lo saben = "P-01 (Por verificar)".
+4. CONFIRMACIÓN: Resume la información y pide confirmación (accion="pedir_confirmacion"). Si confirma, accion="guardar_reporte".
 
 DATOS PREVIOS: ${JSON.stringify(datosPrevios)}
 HISTORIAL: ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
 ÚLTIMO MENSAJE: "${mensaje}"
 
-Responde ÚNICAMENTE con un JSON:
+Responde SOLO con JSON:
 {
   "accion": "conversar" | "pedir_confirmacion" | "guardar_reporte",
-  "respuesta_whatsapp": "Texto de respuesta",
-  "datos_actualizados": {
-    "tipo": "estudio_suelo" | "pilote" | "standby" | "logistica",
-    "sondeo": string | null,
-    "pilote": string | null,
-    "metros": number | null,
-    "pq": number | null,
-    "ensanche": number | null,
-    "encamisado": number | null,
-    "ensayos_spt": number | null,
-    "observaciones": string | null
-  }
+  "respuesta_whatsapp": "Texto para WhatsApp",
+  "datos_actualizados": { "tipo": "estudio_suelo", "sondeo": "S-01", "pilote": null, "metros": 0, "observaciones": "..." }
 }
 `
 
-  // Modelos más rápidos y modernos (002 y 8b evitan el error 404 que viste en la terminal)
-  const modelos = ['gemini-1.5-flash-002', 'gemini-1.5-flash-8b', 'gemini-2.0-flash']
-  let debugError = '';
+  // Modelos oficiales (sin inventos)
+  const modelos = ['gemini-1.5-flash', 'gemini-1.5-flash-8b']
+  let logErrores = []
 
   for (const modelo of modelos) {
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${K}`
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${geminiKey}`
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { responseMimeType: 'application/json', temperature: 0.1 }
-        })
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } })
       })
 
       if (res.ok) {
         const data = await res.json()
-        if (data.candidates?.[0]?.finishReason === 'SAFETY') {
-          return {
-            accion: 'conversar',
-            respuesta_whatsapp: `Don ${operador}, le agradezco si nos enfocamos en el reporte técnico del turno. ¿Me confirma cuántos metros avanzaron hoy o si tuvieron alguna novedad?`,
-            datos_actualizados: { ...datosPrevios }
-          }
-        }
-
+        if (data.candidates?.[0]?.finishReason === 'SAFETY') return { accion: 'conversar', respuesta_whatsapp: `Don ${operador}, enfoquémonos en el reporte técnico.`, datos_actualizados: { ...datosPrevios } }
         let raw = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
         raw = raw.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim()
-        if (raw) {
-          return {
-            accion: JSON.parse(raw).accion || 'conversar',
-            respuesta_whatsapp: JSON.parse(raw).respuesta_whatsapp || '',
-            datos_actualizados: (JSON.parse(raw).datos_actualizados || {}) as DatosReporte
-          }
-        }
+        if (raw) return { accion: JSON.parse(raw).accion || 'conversar', respuesta_whatsapp: JSON.parse(raw).respuesta_whatsapp || '', datos_actualizados: (JSON.parse(raw).datos_actualizados || {}) as DatosReporte }
       } else {
-        const errorText = await res.text()
-        debugError = `[${modelo}: ${res.status}]${errorText.substring(0, 100)}`;
+        const data = await res.json()
+        logErrores.push(`[${modelo}:${data.error?.status || res.status}]`)
       }
     } catch (e: any) {
-      debugError = e.message;
+      logErrores.push(`[${modelo}: error_red]`)
     }
   }
 
-  // SI FALLA LA IA, LO ENVIARÁ AL WHATSAPP PARA QUE LO VEAMOS
   return {
     accion: 'conversar',
-    respuesta_whatsapp: `🛠️ *ERROR DE GOOGLE:* ${debugError}`,
+    respuesta_whatsapp: `🛠️ *REPORTE TÉCNICO (Google Ocupado):* Fallaron los modelos: ${logErrores.join(', ')}. Intente enviar su mensaje en 1 minuto.`,
     datos_actualizados: { ...datosPrevios }
   }
 }
 
-function normalizarTexto(t: string): string {
-  return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim()
-}
-
-function esDespedidaOInterjeccion(limpio: string): boolean {
-  return /^(gracias|ok gracias|muchas gracias|feliz noche|buenas noches|chao|amen|nos vemos|👍|🙏|hasta luego)$/i.test(limpio)
-}
+function normalizarTexto(t: string): string { return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim() }
+function esDespedidaOInterjeccion(limpio: string): boolean { return /^(gracias|ok gracias|muchas gracias|feliz noche|buenas noches|chao|amen|nos vemos|👍|🙏|hasta luego)$/i.test(limpio) }
 
 async function enviarWhatsApp(to: string, text: string) {
   const token = (process.env.WHATSAPP_ACCESS_TOKEN || '').replace(/['"]/g, '').trim()
   if (!token) return
-
   try {
-    await fetch(META_MESSAGES_URL, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'text', text: { body: text } })
-    })
-  } catch (err: any) {
-    console.error('❌ Excepción enviando a Meta:', err.message)
-  }
+    await fetch(META_MESSAGES_URL, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'text', text: { body: text } }) })
+  } catch (err: any) { console.error(err) }
 }
