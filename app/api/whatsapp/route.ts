@@ -183,13 +183,14 @@ async function guardarOActualizarReporte(trabajador: any, d: DatosReporte, texto
 }
 
 async function consultarGeminiInteligente(mensaje: string, operador: string, frente: string, datosPrevios: DatosReporte, historial: MensajeHistorial[]) {
-  const geminiKey = process.env.GEMINI_API_KEY?.trim()
+  // AQUÍ ESTÁ EL CAMBIO CRÍTICO: LECTURA SEGURA DE LA VARIABLE DE VERCEL
+  const geminiKey = (process.env.GEMINI_API_KEY || '').trim()
   
   if (!geminiKey) {
     console.error('❌ La variable GEMINI_API_KEY no existe en el entorno de Vercel.')
     return {
       accion: 'conversar',
-      respuesta_whatsapp: `Don ${operador}, tenemos un problema técnico con la conexión. Por favor, comuníquese con la administración.`,
+      respuesta_whatsapp: `Don ${operador}, tenemos un problema técnico con la conexión al sistema. Por favor, intente enviar su reporte en unos minutos.`,
       datos_actualizados: { ...datosPrevios }
     }
   }
