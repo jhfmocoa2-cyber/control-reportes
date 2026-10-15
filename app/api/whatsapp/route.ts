@@ -13,7 +13,7 @@ interface DatosReporte {
   encamisado?: number | null; ensayos_spt?: number | null; observaciones?: string | null;
 }
 
-interface MemoriaConversacion { datos?: DatosReporte; historial?: MensajeHistorial[] }
+interface MemoriaConversacion { datos?: DatosReporte; historial?: MensajeHistorial[]; last_msg_id?: string }
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
@@ -47,7 +47,6 @@ export async function POST(req: Request) {
 
     const trabajador = trabajadores?.[0]
     if (!trabajador) {
-      await enviarWhatsApp(from, '⚠️ Este número no está registrado como personal operativo en JHF Perforaciones.')
       return NextResponse.json({ status: 'unregistered_user' })
     }
 
@@ -56,6 +55,13 @@ export async function POST(req: Request) {
     const estadoActual = trabajador.estado_conversacion || 'inactivo'
 
     const rawMemoria = (trabajador.borrador_reporte as any) || {}
+    
+    // ESCUDO ANTI-SPAM: Si Meta reenvía el mismo mensaje, lo ignoramos al instante.
+    if (rawMemoria.last_msg_id === message.id) {
+      console.log('⏳ Ignorando reintento de Meta para msj:', message.id)
+      return NextResponse.json({ status: 'ignored_duplicate' })
+    }
+
     const memoria: MemoriaConversacion = {
       datos: rawMemoria.datos || (rawMemoria.tipo ? rawMemoria : {}),
       historial: Array.isArray(rawMemoria.historial) ? rawMemoria.historial : []
@@ -64,8 +70,11 @@ export async function POST(req: Request) {
     const textoCrudo = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || ''
     const textoLimpio = normalizarTexto(textoCrudo)
 
-    if (message.type === 'button' || message.type === 'interactive' || /\b(confirmar recepcion|recepcion)\b/i.test(textoLimpio)) {
-      await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [] } }).eq('id', trabajador.id)
+    // AHORA SE DESPIERTA CON SALUDOS O CON EL BOTÓN
+    const esSaludo = /\b(hola|buenas|buenos dias|buenas tardes|buenas noches|que mas|saludos|confirmar recepcion|recepcion)\b/i.test(textoLimpio)
+    
+    if ((message.type === 'button' || message.type === 'interactive' || esSaludo) && (estadoActual === 'inactivo' || estadoActual === 'esperando_reporte')) {
+      await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id } }).eq('id', trabajador.id)
       await enviarWhatsApp(from, `👋 ¡Hola Don ${nombreOperador}! Te saluda el Asistente de Operaciones de *JHF Perforaciones S.A.S.*\n\n¿Cómo les fue hoy en *${frenteNombre}*?\n\nCuéntame cómo avanzaron o si tuvieron novedades (lluvia, SST o varadas).`)
       return NextResponse.json({ status: 'welcome_sent' })
     }
@@ -86,15 +95,23 @@ export async function POST(req: Request) {
       }
 
       if (/\b(reiniciar|empezar de nuevo|borrar todo|corregir)\b/i.test(textoLimpio)) {
-        await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [] } }).eq('id', trabajador.id)
+        await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id } }).eq('id', trabajador.id)
         await enviarWhatsApp(from, `🔄 Listo Don ${nombreOperador}, dígame qué modificamos del reporte de hoy y se lo actualizo de inmediato.`)
         return NextResponse.json({ status: 'reset_flow' })
       }
+
+      // Guardamos el ID del mensaje para bloquear futuros reintentos de Meta
+      await supabase.from('trabajadores').update({ borrador_reporte: { ...rawMemoria, last_msg_id: message.id } }).eq('id', trabajador.id)
 
       const nuevoItem: MensajeHistorial = { role: 'user', text: textoCrudo }
       const historialActualizado: MensajeHistorial[] = [...(memoria.historial || []), nuevoItem].slice(-8)
 
       const decisionIA = await consultarGeminiInteligente(textoCrudo, nombreOperador, frenteNombre, memoria.datos || {}, historialActualizado)
+
+      // FRACASO SILENCIOSO: Si la IA falló por completo, no hacemos NADA, no enviamos mensajes.
+      if ((decisionIA as any).error_backend) {
+        return NextResponse.json({ status: 'ai_failed_silently' })
+      }
 
       if (decisionIA.accion === 'guardar_reporte') {
         const d = { ...(memoria.datos || {}), ...decisionIA.datos_actualizados }
@@ -109,7 +126,8 @@ export async function POST(req: Request) {
 
       const nuevaMemoria: MemoriaConversacion = {
         datos: { ...(memoria.datos || {}), ...decisionIA.datos_actualizados },
-        historial: historialActualizado.slice(-8)
+        historial: historialActualizado.slice(-8),
+        last_msg_id: message.id
       }
 
       await supabase.from('trabajadores').update({
@@ -152,18 +170,16 @@ async function guardarOActualizarReporte(trabajador: any, d: DatosReporte, texto
 
 async function consultarGeminiInteligente(mensaje: string, operador: string, frente: string, datosPrevios: DatosReporte, historial: MensajeHistorial[]) {
   const geminiKey = (process.env.GEMINI_API_KEY || '').trim()
-  
-  if (!geminiKey) {
-    return { accion: 'conversar', respuesta_whatsapp: `Don ${operador}, tenemos una interrupción temporal de señal. Intente de nuevo.`, datos_actualizados: { ...datosPrevios } }
-  }
+  if (!geminiKey) return { error_backend: true, accion: 'conversar', respuesta_whatsapp: '', datos_actualizados: datosPrevios }
 
   const prompt = `
-Eres el Asistente Técnico de Operaciones de "JHF Perforaciones S.A.S." en Colombia. Hablas con "Don ${operador}".
+Eres el Asistente Técnico de Operaciones de "JHF Perforaciones S.A.S.". Hablas con "Don ${operador}".
 OBJETIVO: Recolectar la bitácora.
 1. NOVEDADES Y STANDBY: Si reportan lluvia, daños o paros SST sin avance: metros = 0, tipo = "standby". Responde: "Comprendido Don ${operador}, lamento el inconveniente." y solicita confirmación.
 2. OPERACIONES: "Prehueco/PQ/Ensanche" = pilote. "Sondeo" = estudio_suelo.
 3. PUNTOS: Si no lo saben = "P-01 (Por verificar)".
-4. CONFIRMACIÓN: Resume la información y pide confirmación (accion="pedir_confirmacion"). Si confirma, accion="guardar_reporte".
+4. CONFIRMACIÓN: Resume la información y pide confirmación. Si confirma, accion="guardar_reporte".
+5. TEMAS ADMINISTRATIVOS: Si preguntan por viáticos, pagos o permisos, diles cortésmente que solo manejas reportes técnicos y que contacten a la oficina. Luego pregúntales por el reporte.
 
 DATOS PREVIOS: ${JSON.stringify(datosPrevios)}
 HISTORIAL: ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
@@ -177,12 +193,10 @@ Responde SOLO con JSON:
 }
 `
 
-  // Usamos los 3 modelos que Google Cloud confirmó que existen y funcionan
-  const modelos = ['gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-flash-latest']
+  const modelos = ['gemini-1.5-flash-8b', 'gemini-1.5-flash']
 
   for (const modelo of modelos) {
-    // Le damos hasta 3 reintentos invisibles a cada modelo si está ocupado (503)
-    for (let intento = 1; intento <= 3; intento++) {
+    for (let intento = 1; intento <= 2; intento++) {
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${geminiKey}`
         const res = await fetch(url, {
@@ -198,25 +212,18 @@ Responde SOLO con JSON:
           raw = raw.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim()
           if (raw) return { accion: JSON.parse(raw).accion || 'conversar', respuesta_whatsapp: JSON.parse(raw).respuesta_whatsapp || '', datos_actualizados: (JSON.parse(raw).datos_actualizados || {}) as DatosReporte }
         } else {
-          // Si el servidor está ocupado, espera 1.5 segundos en silencio y vuelve a intentar
           if (res.status === 503 || res.status === 429) {
-            await new Promise(resolve => setTimeout(resolve, 1500))
-            continue 
+            await new Promise(resolve => setTimeout(resolve, 1000))
+            continue
           }
-          break // Si es un error distinto a "ocupado", pasa al siguiente modelo
+          break
         }
-      } catch (e: any) {
-        break // Si hay error de red, pasa al siguiente modelo
-      }
+      } catch (e: any) { break }
     }
   }
 
-  // Ya no mostramos mensajes de error feos ni de desarrollador.
-  return {
-    accion: 'conversar',
-    respuesta_whatsapp: `Don ${operador}, el sistema central está procesando muchos datos en este momento. Por favor, vuelva a enviarme su último mensaje en unos segundos.`,
-    datos_actualizados: { ...datosPrevios }
-  }
+  // Devolvemos el error invisible
+  return { error_backend: true, accion: 'conversar', respuesta_whatsapp: '', datos_actualizados: datosPrevios }
 }
 
 function normalizarTexto(t: string): string { return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim() }
