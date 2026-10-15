@@ -3,7 +3,6 @@ import { supabase } from '@/lib/supabase'
 
 const META_VERIFY_TOKEN = 'clave_secreta_reportes_2026'
 const META_MESSAGES_URL = 'https://graph.facebook.com/v19.0/1370874296109664/messages'
-const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent'
 
 type TipoOperacion = 'estudio_suelo' | 'pilote' | 'standby' | 'logistica'
 
@@ -183,14 +182,12 @@ async function guardarOActualizarReporte(trabajador: any, d: DatosReporte, texto
 }
 
 async function consultarGeminiInteligente(mensaje: string, operador: string, frente: string, datosPrevios: DatosReporte, historial: MensajeHistorial[]) {
-  // AQUÍ ESTÁ EL CAMBIO CRÍTICO: LECTURA SEGURA DE LA VARIABLE DE VERCEL
-  const geminiKey = (process.env.GEMINI_API_KEY || '').trim()
+  const geminiKey = process.env.GEMINI_API_KEY?.trim()
   
   if (!geminiKey) {
-    console.error('❌ La variable GEMINI_API_KEY no existe en el entorno de Vercel.')
     return {
       accion: 'conversar',
-      respuesta_whatsapp: `Don ${operador}, tenemos un problema técnico con la conexión al sistema. Por favor, intente enviar su reporte en unos minutos.`,
+      respuesta_whatsapp: `Don ${operador}, tenemos un problema con la llave de conexión. Por favor, intente enviar su reporte en unos minutos.`,
       datos_actualizados: { ...datosPrevios }
     }
   }
@@ -200,25 +197,23 @@ Eres el Asistente Técnico de Operaciones de "JHF Perforaciones S.A.S." en Colom
 Hablas con el operador "Don ${operador}" en el proyecto "${frente}".
 Tu tono debe ser profesional, respetuoso, empático y claro ("Don ${operador}", "listo", "comprendido").
 
-TU OBJETIVO:
-Recolectar con precisión la información diaria del frente de trabajo para la bitácora operativa.
+TU OBJETIVO: Recolectar la información diaria del frente de trabajo para la bitácora operativa.
 
-DIRECTRICES TÉCNICAS:
-1. NOVEDADES Y STANDBY: Si el operador reporta lluvia, daños mecánicos (varadas de poleas, correas, equipos) o detenciones por SST:
-   - Si confirman que no hubo avance de perforación, el registro debe ser: metros = 0.0, tipo = "standby".
-   - Responde con empatía técnica: "Comprendido Don ${operador}, lamento el inconveniente con [motivo]." y solicita confirmación para guardar el reporte en 0 metros con esa novedad.
-2. OPERACIONES: "Prehueco", "PQ" o "Ensanche" corresponden a operaciones de Pilotaje. "Sondeo" corresponde a Estudio de Suelo.
-3. IDENTIFICACIÓN DE PUNTOS: Si el operador desconoce el número exacto del punto de perforación, asigna "P-01 (Por verificar)" o "S-01 (Por verificar)" para avanzar con el registro.
-4. CONFIRMACIÓN FINAL: Cuando la información esté completa o el operador indique que no hay más datos, presenta un resumen formal de la jornada y solicita confirmación explícita (acción = "pedir_confirmacion"). Si el operador confirma (ej. "sí", "listo", "de acuerdo", "ok"), la acción debe ser "guardar_reporte".
+DIRECTRICES:
+1. NOVEDADES Y STANDBY: Si reportan lluvia, daños o detenciones por SST sin avance, el registro debe ser: metros = 0, tipo = "standby".
+   Responde con empatía técnica: "Comprendido Don ${operador}, lamento el inconveniente." y solicita confirmación.
+2. OPERACIONES: "Prehueco", "PQ" o "Ensanche" son Pilotaje. "Sondeo" es Estudio de Suelo.
+3. PUNTOS: Si no sabe el punto, asigna "P-01 (Por verificar)" o "S-01 (Por verificar)".
+4. CONFIRMACIÓN: Cuando la información esté completa, presenta un resumen y pide confirmación (acción = "pedir_confirmacion"). Si confirma ("sí", "ok"), acción = "guardar_reporte".
 
-DATOS PARCIALES RECOLECTADOS: ${JSON.stringify(datosPrevios)}
-HISTORIAL DE CHAT: ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
-ÚLTIMO MENSAJE DEL OPERADOR: "${mensaje}"
+DATOS PREVIOS: ${JSON.stringify(datosPrevios)}
+HISTORIAL: ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
+ÚLTIMO MENSAJE: "${mensaje}"
 
-Responde ÚNICAMENTE con un JSON válido siguiendo esta estructura:
+Responde ÚNICAMENTE con un JSON:
 {
   "accion": "conversar" | "pedir_confirmacion" | "guardar_reporte",
-  "respuesta_whatsapp": "Texto de respuesta para el operador",
+  "respuesta_whatsapp": "Texto de respuesta",
   "datos_actualizados": {
     "tipo": "estudio_suelo" | "pilote" | "standby" | "logistica",
     "sondeo": string | null,
@@ -233,41 +228,55 @@ Responde ÚNICAMENTE con un JSON válido siguiendo esta estructura:
 }
 `
 
-  try {
-    const res = await fetch(`${GEMINI_URL}?key=${geminiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.1 }
+  // 🚨 LISTA DE MODELOS DE RESPALDO (Si uno falla por congestión, usa el siguiente)
+  const modelos = [
+    'gemini-1.5-flash-002', 
+    'gemini-1.5-flash-8b', 
+    'gemini-1.5-flash-latest', 
+    'gemini-1.5-flash'
+  ]
+
+  for (const modelo of modelos) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${geminiKey}`
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.1 }
+        })
       })
-    })
 
-    if (res.ok) {
-      const data = await res.json()
-      
-      if (data.candidates?.[0]?.finishReason === 'SAFETY') {
-        return {
-          accion: 'conversar',
-          respuesta_whatsapp: `Don ${operador}, le agradezco si nos enfocamos en el reporte técnico del turno. ¿Me confirma por favor cuántos metros avanzaron hoy o si tuvieron alguna novedad operativa?`,
-          datos_actualizados: { ...datosPrevios }
+      if (res.ok) {
+        const data = await res.json()
+        
+        if (data.candidates?.[0]?.finishReason === 'SAFETY') {
+          return {
+            accion: 'conversar',
+            respuesta_whatsapp: `Don ${operador}, le agradezco si nos enfocamos en el reporte técnico del turno. ¿Me confirma cuántos metros avanzaron hoy o si tuvieron alguna novedad?`,
+            datos_actualizados: { ...datosPrevios }
+          }
         }
-      }
 
-      let raw = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
-      raw = raw.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim()
-      if (raw) {
-        return {
-          accion: JSON.parse(raw).accion || 'conversar',
-          respuesta_whatsapp: JSON.parse(raw).respuesta_whatsapp || '',
-          datos_actualizados: (JSON.parse(raw).datos_actualizados || {}) as DatosReporte
+        let raw = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+        raw = raw.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim()
+        if (raw) {
+          return {
+            accion: JSON.parse(raw).accion || 'conversar',
+            respuesta_whatsapp: JSON.parse(raw).respuesta_whatsapp || '',
+            datos_actualizados: (JSON.parse(raw).datos_actualizados || {}) as DatosReporte
+          }
         }
+      } else {
+        console.warn(`⚠️ Modelo ${modelo} falló con status ${res.status}. Intentando el siguiente...`)
       }
+    } catch (e: any) {
+      console.warn(`⚠️ Excepción con modelo ${modelo}:${e.message}`)
     }
-  } catch (e: any) {
-    console.error('❌ Excepción llamando a Gemini:', e.message)
   }
 
+  // Si TODOS los modelos fallan por congestión masiva
   return {
     accion: 'conversar',
     respuesta_whatsapp: `Don ${operador}, la señal está un poco inestable. ¿Podría repetirme la información técnica de su avance de hoy, por favor?`,
@@ -294,6 +303,6 @@ async function enviarWhatsApp(to: string, text: string) {
       body: JSON.stringify({ messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'text', text: { body: text } })
     })
   } catch (err: any) {
-    console.error('❌ Excepción de red enviando a Meta:', err.message)
+    console.error('❌ Excepción enviando a Meta:', err.message)
   }
 }
