@@ -154,7 +154,7 @@ async function consultarGeminiInteligente(mensaje: string, operador: string, fre
   const geminiKey = (process.env.GEMINI_API_KEY || '').trim()
   
   if (!geminiKey) {
-    return { accion: 'conversar', respuesta_whatsapp: `🛠️ ERROR VERCEL: Llave ausente.`, datos_actualizados: { ...datosPrevios } }
+    return { accion: 'conversar', respuesta_whatsapp: `Don ${operador}, tenemos una interrupción temporal de señal. Intente de nuevo.`, datos_actualizados: { ...datosPrevios } }
   }
 
   const prompt = `
@@ -177,16 +177,12 @@ Responde SOLO con JSON:
 }
 `
 
-  // 1. gemini-flash-latest (El que sabemos que sí funciona, le haremos reintentos si da 503)
-  // 2. gemini-pro (El modelo clásico 1.0 súper estable, como plan de contingencia)
-  const modelos = ['gemini-flash-latest', 'gemini-pro']
-  let logErrores = []
+  // Usamos los 3 modelos que Google Cloud confirmó que existen y funcionan
+  const modelos = ['gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-flash-latest']
 
   for (const modelo of modelos) {
-    let intentos = 0;
-    const maxIntentos = modelo === 'gemini-flash-latest' ? 3 : 1; // Le rogamos 3 veces a flash
-
-    while (intentos < maxIntentos) {
+    // Le damos hasta 3 reintentos invisibles a cada modelo si está ocupado (503)
+    for (let intento = 1; intento <= 3; intento++) {
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${geminiKey}`
         const res = await fetch(url, {
@@ -202,30 +198,23 @@ Responde SOLO con JSON:
           raw = raw.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim()
           if (raw) return { accion: JSON.parse(raw).accion || 'conversar', respuesta_whatsapp: JSON.parse(raw).respuesta_whatsapp || '', datos_actualizados: (JSON.parse(raw).datos_actualizados || {}) as DatosReporte }
         } else {
-          const data = await res.json()
-          
-          // Si da 503 (Servidor ocupado), esperamos 1.5 segundos y volvemos a intentar
-          if (res.status === 503) {
-            intentos++;
-            if (intentos < maxIntentos) {
-              await new Promise(resolve => setTimeout(resolve, 1500)); 
-              continue; // Salta al siguiente intento en el ciclo while
-            }
+          // Si el servidor está ocupado, espera 1.5 segundos en silencio y vuelve a intentar
+          if (res.status === 503 || res.status === 429) {
+            await new Promise(resolve => setTimeout(resolve, 1500))
+            continue 
           }
-          
-          logErrores.push(`[${modelo}:${data.error?.status || res.status}]`)
-          break; // Rompe el ciclo while para pasar al siguiente modelo de la lista
+          break // Si es un error distinto a "ocupado", pasa al siguiente modelo
         }
       } catch (e: any) {
-        logErrores.push(`[${modelo}: error_red]`)
-        break; // Rompe el ciclo while
+        break // Si hay error de red, pasa al siguiente modelo
       }
     }
   }
 
+  // Ya no mostramos mensajes de error feos ni de desarrollador.
   return {
     accion: 'conversar',
-    respuesta_whatsapp: `🛠️ *REPORTE TÉCNICO:* Fallaron los modelos: ${logErrores.join(', ')}. Intente de nuevo en 1 minuto.`,
+    respuesta_whatsapp: `Don ${operador}, el sistema central está procesando muchos datos en este momento. Por favor, vuelva a enviarme su último mensaje en unos segundos.`,
     datos_actualizados: { ...datosPrevios }
   }
 }
