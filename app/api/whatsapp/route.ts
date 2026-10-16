@@ -61,33 +61,33 @@ export async function POST(req: Request) {
     const textoCrudo = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || ''
     const textoLimpio = normalizarTexto(textoCrudo)
     
-    // MENSAJES DEL SISTEMA LIMPIOS (SIN EL "DON")
     if (/\b(reiniciar|empezar de nuevo|borrar todo|corregir)\b/i.test(textoLimpio)) {
       await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id } }).eq('id', trabajador.id)
-      await enviarWhatsApp(from, `🔄 Listo ${nombreOperador}, sistema destrabado. ¿Qué novedades tenemos?`)
+      await enviarWhatsApp(from, `🔄 ¡Listo ${nombreOperador}! Sistema reiniciado y destrabado. Cuéntame, ¿qué novedades tenemos?`)
       return NextResponse.json({ status: 'reset_flow' })
     }
 
     const esSaludo = /\b(hola|ola|holi|oli|buenas|buenos dias|buenas tardes|buenas noches|que mas|saludos|confirmar recepcion|recepcion)\b/i.test(textoLimpio)
     
+    // BIENVENIDA MÁS ALEGRE Y TÉCNICA
     if ((message.type === 'button' || message.type === 'interactive' || esSaludo) && (estadoActual === 'inactivo' || estadoActual === 'esperando_reporte')) {
       await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id } }).eq('id', trabajador.id)
-      await enviarWhatsApp(from, `👋 ¡Hola ${nombreOperador}! Te saluda el Asistente de Operaciones de *JHF Perforaciones S.A.S.*\n\n¿Cómo les fue hoy en *${frenteNombre}*?\n\nCuéntame cómo avanzaron o si tuvieron novedades.`)
+      await enviarWhatsApp(from, `👋 ¡Qué más ${nombreOperador}! Te saluda tu Asistente de Operaciones de *JHF Perforaciones S.A.S.*\n\n¿Cómo nos trató hoy el proyecto *${frenteNombre}*? 💪\n\nCuéntame en qué número de pilote o sondeo andamos y cómo estuvo el avance (o si tuvimos alguna novedad para tenerla en cuenta).`)
       return NextResponse.json({ status: 'welcome_sent' })
     }
 
     if (message.type === 'audio' || message.type === 'voice') {
-      await enviarWhatsApp(from, `👋 ${nombreOperador}, por ahora no puedo escuchar audios. Escríbame porfa un mensajito con el reporte.`)
+      await enviarWhatsApp(from, `👋 ¡Qué pena ${nombreOperador}! Por ahora soy un poquito sordo para los audios. Escríbeme el reporte en un mensajito corto, porfa.`)
       return NextResponse.json({ status: 'audio_rejected' })
     }
     if (message.type === 'image') {
-      await enviarWhatsApp(from, `📷 ¡Foto recibida, ${nombreOperador}! Queda registrada como soporte en la bitácora.`)
+      await enviarWhatsApp(from, `📷 ¡Excelente foto ${nombreOperador}! Ya la dejé guardada como soporte en nuestra bitácora.`)
       return NextResponse.json({ status: 'image_received' })
     }
 
     if (message.type === 'text') {
       if (estadoActual === 'inactivo' && esDespedidaOInterjeccion(textoLimpio)) {
-        await enviarWhatsApp(from, `🙏 ¡Con todo el gusto, ${nombreOperador}! Buen descanso.`)
+        await enviarWhatsApp(from, `🙏 ¡Con todo el gusto, ${nombreOperador}! Que pases un excelente descanso. Nos vemos mañana.`)
         return NextResponse.json({ status: 'closed_courtesy' })
       }
 
@@ -146,29 +146,26 @@ async function consultarGroq(mensaje: string, operador: string, frente: string, 
   const groqKey = (process.env.GROQ_API_KEY || '').trim()
   if (!groqKey) return { accion: 'conversar', respuesta_whatsapp: `🛠️ ERROR VERCEL: Llave GROQ_API_KEY no encontrada.`, datos_actualizados: datosPrevios }
 
-  // PROMPT LIBERADO Y NATURAL
   const prompt = `
-Eres el Asistente Técnico de Operaciones de JHF Perforaciones S.A.S. en Colombia.
-Estás hablando por WhatsApp con el operador: "${operador}" que trabaja en el proyecto "${frente}".
+Eres el Asistente Técnico de Operaciones de JHF Perforaciones S.A.S. en Colombia. Hablas con "${operador}" en el proyecto "${frente}".
+TONO Y PERSONALIDAD: Eres un compañero de trabajo alegre, motivador y con excelente actitud (sin ser empalagoso). NUNCA uses la palabra "Don" ni "Doña". Llámalo por su nombre ("${operador}").
 
-TU PROPÓSITO:
-Eres un compañero de trabajo natural, empático y directo. Tu ÚNICO objetivo es entender qué se hizo hoy en la obra y recolectar los datos para la bitácora. 
-
-CÓMO DEBES ACTUAR:
-- Sé conversacional y fluido. Llama a la persona por su nombre ("${operador}"). NUNCA uses la palabra "Don" ni "Doña".
-- Tienes sentido común: Si te dan un contexto enredado (ej. "llevo 15 metros en el pilote A, pero hoy le metí 2 al pilote B"), extrae mentalmente SOLO el avance de HOY (2 metros) y guarda toda la historia como contexto en tus "observaciones".
-- Criterio técnico: Si hablan de "Prehueco", "PQ" o "Ensanche", clasifícalo como "pilote". Si es "Sondeo", es "estudio_suelo".
-- Novedades: Si reportan lluvia, daños o pausas, asume que los metros de hoy son 0 y el tipo es "standby". 
-- Distracciones: Si te hablan de plata, permisos o viáticos, diles cordialmente que tú solo consolidas reportes técnicos y que hablen con la oficina. Inmediatamente después, vuelve a tu objetivo: preguntar por el avance de hoy.
-- Cierre: Cuando tengas claro el resumen de hoy, preséntaselo al operador de forma clara y pídele que te lo confirme. Si el operador te confirma ("sí", "listo", "ok", "sisas"), tu acción debe cambiar a "guardar_reporte".
+TU PROPÓSITO Y LÓGICA TÉCNICA:
+1. INDAGAR E IDENTIFICAR: Lo primero que debes saber es en qué número de pilote o sondeo están trabajando hoy (ej. Pilote 14). Si no lo sabes, pregúntalo con buena energía. Si te dicen que ya terminaron o entregaron un pilote, ¡felicítalos por el buen trabajo! y pregúntales a cuál pasan ahora.
+2. DOMINIO DE PERFORACIÓN (PILOTES): Sabes que un pilote implica 1) Prehueco (en PQ o 5 pulgadas), 2) Reperforación o Ensanche (a 8 pulgadas), 3) Encamisado. Si el operador te explica su día sumando acumulados, tú debes extraer y registrar SOLO lo avanzado HOY. 
+3. NOVEDADES Y SISO: "SISO" significa encargado de Salud y Seguridad en el Trabajo (SST), NO es un sismo ni un terremoto. Lluvia, varadas de equipo, o paros por el SISO cuentan como "standby" (metros = 0).
+4. REPORTES TEMPRANOS: Si el operador te escribe una novedad temprano o a mitad de jornada (ej. "me varé"), no asumas que el día terminó. Guárdalo, dale ánimo ("¡Uy ${operador}, qué mala pata con esa varada!") y pregúntale textualmente: "¿Con esto cerramos el reporte de hoy, o me quedo atento por si solucionan y le dan más metros más tarde?". 
+5. CONSOLIDADO FINAL DE LA OBSERVACIÓN: Cuando vayan a cerrar el día, genera una "observación" clara que acumule la historia. Ejemplo que debes generar en la variable observaciones: "${operador} avanzó 1m de prehueco en el Pilote 21. El pilote va en 10m encamisados y 11m perforados totales".
+6. CHARLA CASUAL: Si el operador te dice algo como "estoy aburrido" o "qué sueño", síguele la corriente como un compañero ("¡Ánimo ${operador} que ya casi coronamos!"), no le exijas el reporte como un robot.
+7. CIERRE: Resume el avance de hoy y pide confirmación (accion="pedir_confirmacion"). Si aprueba ("sí", "listo", "ok"), accion="guardar_reporte".
 
 DATOS PREVIOS: ${JSON.stringify(datosPrevios)}
-HISTORIAL DE LA CONVERSACIÓN: ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
+HISTORIAL DE CONVERSACIÓN: ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
 
 RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
 {
   "accion": "conversar" | "pedir_confirmacion" | "guardar_reporte",
-  "respuesta_whatsapp": "Tu respuesta natural y conversacional aquí...",
+  "respuesta_whatsapp": "Tu respuesta alegre y motivadora aquí...",
   "datos_actualizados": {
     "tipo": "estudio_suelo" | "pilote" | "standby" | "logistica",
     "sondeo": string | null,
