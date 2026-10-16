@@ -37,7 +37,12 @@ export async function POST(req: Request) {
     const cleanTo = from.replace(/\D/g, '')
     const localPhone = cleanTo.replace(/^579?/, '')
 
-    const { data: trabajadores } = await supabase.from('trabajadores').select('*, proyectos(nombre)').or(`telefono.eq.${cleanTo},telefono.eq.${localPhone},telefono.eq.57${localPhone}`).eq('activo', true)
+    const { data: trabajadores } = await supabase
+      .from('trabajadores')
+      .select('*, proyectos(nombre)')
+      .or(`telefono.eq.${cleanTo},telefono.eq.${localPhone},telefono.eq.57${localPhone}`)
+      .eq('activo', true)
+
     const trabajador = trabajadores?.[0]
     if (!trabajador) return NextResponse.json({ status: 'unregistered_user' })
 
@@ -46,6 +51,7 @@ export async function POST(req: Request) {
     const estadoActual = trabajador.estado_conversacion || 'inactivo'
     const rawMemoria = (trabajador.borrador_reporte as any) || {}
     
+    // Filtro anti-duplicados de Meta
     if (rawMemoria.last_msg_id === message.id) return NextResponse.json({ status: 'ignored_duplicate' })
 
     const memoria: MemoriaConversacion = {
@@ -139,19 +145,40 @@ async function consultarGroq(mensaje: string, operador: string, frente: string, 
   if (!groqKey) return { accion: 'conversar', respuesta_whatsapp: `🛠️ ERROR VERCEL: Llave GROQ_API_KEY no encontrada.`, datos_actualizados: datosPrevios }
 
   const prompt = `
-Eres el Asistente Técnico de Operaciones de JHF Perforaciones S.A.S.
-OBJETIVO: Recolectar la bitácora.
-NOVEDADES: Si reportan lluvia/SST = 0 metros, standby.
-CONFIRMACIÓN: Resume y pide confirmación (accion="pedir_confirmacion"). Si aprueba, accion="guardar_reporte".
+Eres el Asistente Técnico de Operaciones de "JHF Perforaciones S.A.S." en Colombia. Hablas con "Don ${operador}" en el proyecto "${frente}".
+OBJETIVO: Recolectar la bitácora operativa diaria.
 
-DATOS: ${JSON.stringify(datosPrevios)}
+DIRECTRICES:
+1. NOVEDADES Y STANDBY: Si reportan lluvia, daños o paros SST sin avance: metros = 0, tipo = "standby". Responde con empatía técnica y pide confirmación.
+2. OPERACIONES: "Prehueco/PQ/Ensanche" = pilote. "Sondeo" = estudio_suelo.
+3. PUNTOS: Si no lo saben = "P-01 (Por verificar)".
+4. CONFIRMACIÓN: Resume la información y pide confirmación (accion="pedir_confirmacion"). Si aprueba ("sí", "ok"), accion="guardar_reporte".
+5. TEMAS ADMINISTRATIVOS: Si preguntan por viáticos, pagos o permisos, diles cortésmente que solo manejas reportes técnicos de obra y que contacten a la oficina. Luego pregúntales por el reporte técnico.
+
+DATOS PREVIOS: ${JSON.stringify(datosPrevios)}
 HISTORIAL: ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
 
-RESPONDE SOLO EN JSON:
-{"accion":"conversar"|"pedir_confirmacion"|"guardar_reporte","respuesta_whatsapp":"...","datos_actualizados":{"tipo":"estudio_suelo","metros":0}}
+RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
+{
+  "accion": "conversar" | "pedir_confirmacion" | "guardar_reporte",
+  "respuesta_whatsapp": "Texto para WhatsApp",
+  "datos_actualizados": {
+    "tipo": "estudio_suelo" | "pilote" | "standby" | "logistica",
+    "sondeo": string | null,
+    "pilote": string | null,
+    "metros": number | null,
+    "pq": number | null,
+    "ensanche": number | null,
+    "encamisado": number | null,
+    "ensayos_spt": number | null,
+    "observaciones": string | null
+  }
+}
 `
   let logErrores = []
-  const modelos = ['llama-3.1-70b-versatile', 'llama3-8b-8192'] // Probamos con dos modelos distintos de Groq
+  
+  // Modelos oficiales vigentes y recomendados por Groq
+  const modelos = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b']
 
   for (const modelo of modelos) {
     try {
@@ -160,8 +187,19 @@ RESPONDE SOLO EN JSON:
 
       const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${groqKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: modelo, messages: [{ role: 'system', content: prompt }, { role: 'user', content: mensaje }], response_format: { type: 'json_object' }, temperature: 0.1 }),
+        headers: { 
+          'Authorization': `Bearer ${groqKey}`, 
+          'Content-Type': 'application/json' 
+        },
+        body: JSON.stringify({ 
+          model: modelo, 
+          messages: [
+            { role: 'system', content: prompt }, 
+            { role: 'user', content: mensaje }
+          ], 
+          response_format: { type: 'json_object' }, 
+          temperature: 0.1 
+        }),
         signal: controller.signal
       })
       clearTimeout(timeoutId)
@@ -170,17 +208,23 @@ RESPONDE SOLO EN JSON:
         const data = await res.json()
         let raw = data.choices?.[0]?.message?.content || ''
         raw = raw.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim()
-        if (raw) return { accion: JSON.parse(raw).accion || 'conversar', respuesta_whatsapp: JSON.parse(raw).respuesta_whatsapp || '', datos_actualizados: (JSON.parse(raw).datos_actualizados || {}) as DatosReporte }
+        if (raw) {
+          const parsed = JSON.parse(raw)
+          return { 
+            accion: parsed.accion || 'conversar', 
+            respuesta_whatsapp: parsed.respuesta_whatsapp || '', 
+            datos_actualizados: (parsed.datos_actualizados || {}) as DatosReporte 
+          }
+        }
       } else {
         const data = await res.json()
-        logErrores.push(`[${modelo}: ${res.status}]${JSON.stringify(data.error || 'error_desconocido')}`)
+        logErrores.push(`[${modelo}: ${res.status}]${JSON.stringify(data.error?.message || 'error')}`)
       }
     } catch (e: any) {
-      logErrores.push(`[${modelo}: EXCEPCIÓN] ${e.message}`)
+      logErrores.push(`[${modelo}: timeout/red]${e.message}`)
     }
   }
 
-  // SI FALLA, MUESTRA EL ERROR EXACTO POR WHATSAPP
   return { accion: 'conversar', respuesta_whatsapp: `🛠️ ERROR GROQ: ${logErrores.join(' | ')}`, datos_actualizados: datosPrevios }
 }
 
