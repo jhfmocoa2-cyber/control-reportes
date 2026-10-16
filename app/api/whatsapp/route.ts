@@ -46,19 +46,14 @@ export async function POST(req: Request) {
       .eq('activo', true)
 
     const trabajador = trabajadores?.[0]
-    if (!trabajador) {
-      return NextResponse.json({ status: 'unregistered_user' })
-    }
+    if (!trabajador) return NextResponse.json({ status: 'unregistered_user' })
 
     const nombreOperador = trabajador.nombre
     const frenteNombre = trabajador.proyectos?.nombre || 'General'
     const estadoActual = trabajador.estado_conversacion || 'inactivo'
     const rawMemoria = (trabajador.borrador_reporte as any) || {}
     
-    // ESCUDO ANTI-SPAM
-    if (rawMemoria.last_msg_id === message.id) {
-      return NextResponse.json({ status: 'ignored_duplicate' })
-    }
+    if (rawMemoria.last_msg_id === message.id) return NextResponse.json({ status: 'ignored_duplicate' })
 
     const memoria: MemoriaConversacion = {
       datos: rawMemoria.datos || (rawMemoria.tipo ? rawMemoria : {}),
@@ -68,7 +63,6 @@ export async function POST(req: Request) {
     const textoCrudo = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || ''
     const textoLimpio = normalizarTexto(textoCrudo)
 
-    // DICCIONARIO AMPLIADO (Ahora incluye oli, holi, ola)
     const esSaludo = /\b(hola|ola|holi|oli|buenas|buenos dias|buenas tardes|buenas noches|que mas|saludos|confirmar recepcion|recepcion)\b/i.test(textoLimpio)
     
     if ((message.type === 'button' || message.type === 'interactive' || esSaludo) && (estadoActual === 'inactivo' || estadoActual === 'esperando_reporte')) {
@@ -103,7 +97,7 @@ export async function POST(req: Request) {
       const nuevoItem: MensajeHistorial = { role: 'user', text: textoCrudo }
       const historialActualizado: MensajeHistorial[] = [...(memoria.historial || []), nuevoItem].slice(-8)
 
-      const decisionIA = await consultarGeminiInteligente(textoCrudo, nombreOperador, frenteNombre, memoria.datos || {}, historialActualizado)
+      const decisionIA = await consultarGroq(textoCrudo, nombreOperador, frenteNombre, memoria.datos || {}, historialActualizado)
 
       if (decisionIA.accion === 'guardar_reporte') {
         const d = { ...(memoria.datos || {}), ...decisionIA.datos_actualizados }
@@ -160,9 +154,13 @@ async function guardarOActualizarReporte(trabajador: any, d: DatosReporte, texto
   }
 }
 
-async function consultarGeminiInteligente(mensaje: string, operador: string, frente: string, datosPrevios: DatosReporte, historial: MensajeHistorial[]) {
-  const geminiKey = (process.env.GEMINI_API_KEY || '').trim()
-  if (!geminiKey) return { accion: 'conversar', respuesta_whatsapp: `Don ${operador}, la señal está inestable. Intente en un momento.`, datos_actualizados: datosPrevios }
+async function consultarGroq(mensaje: string, operador: string, frente: string, datosPrevios: DatosReporte, historial: MensajeHistorial[]) {
+  // AHORA LEE EXCLUSIVAMENTE LA VARIABLE DE ENTORNO
+  const groqKey = (process.env.GROQ_API_KEY || '').trim()
+
+  if (!groqKey) {
+    return { accion: 'conversar', respuesta_whatsapp: `🛠️ ERROR VERCEL: No se detectó la variable GROQ_API_KEY.`, datos_actualizados: { ...datosPrevios } }
+  }
 
   const prompt = `
 Eres el Asistente Técnico de Operaciones de "JHF Perforaciones S.A.S.". Hablas con "Don ${operador}".
@@ -175,9 +173,8 @@ OBJETIVO: Recolectar la bitácora.
 
 DATOS PREVIOS: ${JSON.stringify(datosPrevios)}
 HISTORIAL: ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
-ÚLTIMO MENSAJE: "${mensaje}"
 
-Responde SOLO con JSON:
+DEBES RESPONDER ÚNICA Y EXCLUSIVAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
 {
   "accion": "conversar" | "pedir_confirmacion" | "guardar_reporte",
   "respuesta_whatsapp": "Texto para WhatsApp",
@@ -186,15 +183,24 @@ Responde SOLO con JSON:
 `
 
   try {
-    // CRONÓMETRO DE 7.5 SEGUNDOS: Si Google no responde, cortamos para que Vercel no nos mate a los 10s.
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), 7500)
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${geminiKey}`
-    const res = await fetch(url, {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } }),
+      headers: {
+        'Authorization': `Bearer ${groqKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'llama-3.1-70b-versatile',
+        messages: [
+          { role: 'system', content: prompt },
+          { role: 'user', content: mensaje }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.1
+      }),
       signal: controller.signal
     })
     
@@ -202,20 +208,22 @@ Responde SOLO con JSON:
 
     if (res.ok) {
       const data = await res.json()
-      if (data.candidates?.[0]?.finishReason === 'SAFETY') return { accion: 'conversar', respuesta_whatsapp: `Don ${operador}, enfoquémonos en el reporte técnico por favor.`, datos_actualizados: { ...datosPrevios } }
-      let raw = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+      let raw = data.choices?.[0]?.message?.content || ''
       raw = raw.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim()
-      if (raw) return { accion: JSON.parse(raw).accion || 'conversar', respuesta_whatsapp: JSON.parse(raw).respuesta_whatsapp || '', datos_actualizados: (JSON.parse(raw).datos_actualizados || {}) as DatosReporte }
-    } else {
-      // Si Google da ocupado (503), respondemos suave para que el trabajador sepa qué hacer.
-      return { accion: 'conversar', respuesta_whatsapp: `⏳ Don ${operador}, el sistema central está sincronizando datos. Por favor, vuelva a enviarme este último mensaje en 1 minutico.`, datos_actualizados: { ...datosPrevios } }
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        return { 
+          accion: parsed.accion || 'conversar', 
+          respuesta_whatsapp: parsed.respuesta_whatsapp || '', 
+          datos_actualizados: (parsed.datos_actualizados || {}) as DatosReporte 
+        }
+      }
     }
   } catch (e: any) {
-    // Si el cronómetro cortó la llamada a los 7.5 segundos, caemos aquí (evitando la muerte épica)
-    return { accion: 'conversar', respuesta_whatsapp: `⏳ Don ${operador}, la red de la central está un poco pesada. Por favor, vuelva a enviarme el reporte en 1 minutico.`, datos_actualizados: { ...datosPrevios } }
+    console.error("❌ Excepción con Groq:", e.message)
   }
 
-  return { accion: 'conversar', respuesta_whatsapp: `Don ${operador}, hubo un error de conexión. Intente en un momento.`, datos_actualizados: datosPrevios }
+  return { accion: 'conversar', respuesta_whatsapp: `⏳ Don ${operador}, denme un segundito que el sistema está guardando los datos. Vuelva a enviarme este último mensaje porfa.`, datos_actualizados: { ...datosPrevios } }
 }
 
 function normalizarTexto(t: string): string { return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim() }
