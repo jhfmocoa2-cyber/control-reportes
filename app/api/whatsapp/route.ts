@@ -53,12 +53,10 @@ export async function POST(req: Request) {
     const nombreOperador = trabajador.nombre
     const frenteNombre = trabajador.proyectos?.nombre || 'General'
     const estadoActual = trabajador.estado_conversacion || 'inactivo'
-
     const rawMemoria = (trabajador.borrador_reporte as any) || {}
     
-    // ESCUDO ANTI-SPAM: Si Meta reenvía el mismo mensaje, lo ignoramos al instante.
+    // ESCUDO ANTI-SPAM
     if (rawMemoria.last_msg_id === message.id) {
-      console.log('⏳ Ignorando reintento de Meta para msj:', message.id)
       return NextResponse.json({ status: 'ignored_duplicate' })
     }
 
@@ -70,8 +68,8 @@ export async function POST(req: Request) {
     const textoCrudo = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || ''
     const textoLimpio = normalizarTexto(textoCrudo)
 
-    // AHORA SE DESPIERTA CON SALUDOS O CON EL BOTÓN
-    const esSaludo = /\b(hola|buenas|buenos dias|buenas tardes|buenas noches|que mas|saludos|confirmar recepcion|recepcion)\b/i.test(textoLimpio)
+    // DICCIONARIO AMPLIADO (Ahora incluye oli, holi, ola)
+    const esSaludo = /\b(hola|ola|holi|oli|buenas|buenos dias|buenas tardes|buenas noches|que mas|saludos|confirmar recepcion|recepcion)\b/i.test(textoLimpio)
     
     if ((message.type === 'button' || message.type === 'interactive' || esSaludo) && (estadoActual === 'inactivo' || estadoActual === 'esperando_reporte')) {
       await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id } }).eq('id', trabajador.id)
@@ -100,18 +98,12 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'reset_flow' })
       }
 
-      // Guardamos el ID del mensaje para bloquear futuros reintentos de Meta
       await supabase.from('trabajadores').update({ borrador_reporte: { ...rawMemoria, last_msg_id: message.id } }).eq('id', trabajador.id)
 
       const nuevoItem: MensajeHistorial = { role: 'user', text: textoCrudo }
       const historialActualizado: MensajeHistorial[] = [...(memoria.historial || []), nuevoItem].slice(-8)
 
       const decisionIA = await consultarGeminiInteligente(textoCrudo, nombreOperador, frenteNombre, memoria.datos || {}, historialActualizado)
-
-      // FRACASO SILENCIOSO: Si la IA falló por completo, no hacemos NADA, no enviamos mensajes.
-      if ((decisionIA as any).error_backend) {
-        return NextResponse.json({ status: 'ai_failed_silently' })
-      }
 
       if (decisionIA.accion === 'guardar_reporte') {
         const d = { ...(memoria.datos || {}), ...decisionIA.datos_actualizados }
@@ -170,16 +162,16 @@ async function guardarOActualizarReporte(trabajador: any, d: DatosReporte, texto
 
 async function consultarGeminiInteligente(mensaje: string, operador: string, frente: string, datosPrevios: DatosReporte, historial: MensajeHistorial[]) {
   const geminiKey = (process.env.GEMINI_API_KEY || '').trim()
-  if (!geminiKey) return { error_backend: true, accion: 'conversar', respuesta_whatsapp: '', datos_actualizados: datosPrevios }
+  if (!geminiKey) return { accion: 'conversar', respuesta_whatsapp: `Don ${operador}, la señal está inestable. Intente en un momento.`, datos_actualizados: datosPrevios }
 
   const prompt = `
 Eres el Asistente Técnico de Operaciones de "JHF Perforaciones S.A.S.". Hablas con "Don ${operador}".
 OBJETIVO: Recolectar la bitácora.
-1. NOVEDADES Y STANDBY: Si reportan lluvia, daños o paros SST sin avance: metros = 0, tipo = "standby". Responde: "Comprendido Don ${operador}, lamento el inconveniente." y solicita confirmación.
+1. NOVEDADES/STANDBY: Si reportan lluvia, daños o paros SST sin avance: metros=0, tipo="standby". Responde empatizando y pide confirmación.
 2. OPERACIONES: "Prehueco/PQ/Ensanche" = pilote. "Sondeo" = estudio_suelo.
 3. PUNTOS: Si no lo saben = "P-01 (Por verificar)".
-4. CONFIRMACIÓN: Resume la información y pide confirmación. Si confirma, accion="guardar_reporte".
-5. TEMAS ADMINISTRATIVOS: Si preguntan por viáticos, pagos o permisos, diles cortésmente que solo manejas reportes técnicos y que contacten a la oficina. Luego pregúntales por el reporte.
+4. CONFIRMACIÓN: Resume y pide confirmación. Si confirma, accion="guardar_reporte".
+5. TEMAS ADMINISTRATIVOS: Si preguntan por viáticos o pagos, diles cortésmente que solo manejas reportes técnicos y que contacten a la oficina. Luego pregúntales por el reporte.
 
 DATOS PREVIOS: ${JSON.stringify(datosPrevios)}
 HISTORIAL: ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
@@ -193,37 +185,37 @@ Responde SOLO con JSON:
 }
 `
 
-  const modelos = ['gemini-1.5-flash-8b', 'gemini-1.5-flash']
+  try {
+    // CRONÓMETRO DE 7.5 SEGUNDOS: Si Google no responde, cortamos para que Vercel no nos mate a los 10s.
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 7500)
 
-  for (const modelo of modelos) {
-    for (let intento = 1; intento <= 2; intento++) {
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${geminiKey}`
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } })
-        })
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${geminiKey}`
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } }),
+      signal: controller.signal
+    })
+    
+    clearTimeout(timeoutId)
 
-        if (res.ok) {
-          const data = await res.json()
-          if (data.candidates?.[0]?.finishReason === 'SAFETY') return { accion: 'conversar', respuesta_whatsapp: `Don ${operador}, enfoquémonos en el reporte técnico.`, datos_actualizados: { ...datosPrevios } }
-          let raw = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
-          raw = raw.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim()
-          if (raw) return { accion: JSON.parse(raw).accion || 'conversar', respuesta_whatsapp: JSON.parse(raw).respuesta_whatsapp || '', datos_actualizados: (JSON.parse(raw).datos_actualizados || {}) as DatosReporte }
-        } else {
-          if (res.status === 503 || res.status === 429) {
-            await new Promise(resolve => setTimeout(resolve, 1000))
-            continue
-          }
-          break
-        }
-      } catch (e: any) { break }
+    if (res.ok) {
+      const data = await res.json()
+      if (data.candidates?.[0]?.finishReason === 'SAFETY') return { accion: 'conversar', respuesta_whatsapp: `Don ${operador}, enfoquémonos en el reporte técnico por favor.`, datos_actualizados: { ...datosPrevios } }
+      let raw = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+      raw = raw.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim()
+      if (raw) return { accion: JSON.parse(raw).accion || 'conversar', respuesta_whatsapp: JSON.parse(raw).respuesta_whatsapp || '', datos_actualizados: (JSON.parse(raw).datos_actualizados || {}) as DatosReporte }
+    } else {
+      // Si Google da ocupado (503), respondemos suave para que el trabajador sepa qué hacer.
+      return { accion: 'conversar', respuesta_whatsapp: `⏳ Don ${operador}, el sistema central está sincronizando datos. Por favor, vuelva a enviarme este último mensaje en 1 minutico.`, datos_actualizados: { ...datosPrevios } }
     }
+  } catch (e: any) {
+    // Si el cronómetro cortó la llamada a los 7.5 segundos, caemos aquí (evitando la muerte épica)
+    return { accion: 'conversar', respuesta_whatsapp: `⏳ Don ${operador}, la red de la central está un poco pesada. Por favor, vuelva a enviarme el reporte en 1 minutico.`, datos_actualizados: { ...datosPrevios } }
   }
 
-  // Devolvemos el error invisible
-  return { error_backend: true, accion: 'conversar', respuesta_whatsapp: '', datos_actualizados: datosPrevios }
+  return { accion: 'conversar', respuesta_whatsapp: `Don ${operador}, hubo un error de conexión. Intente en un momento.`, datos_actualizados: datosPrevios }
 }
 
 function normalizarTexto(t: string): string { return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim() }
