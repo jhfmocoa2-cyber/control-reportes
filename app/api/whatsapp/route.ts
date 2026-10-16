@@ -51,7 +51,6 @@ export async function POST(req: Request) {
     const estadoActual = trabajador.estado_conversacion || 'inactivo'
     const rawMemoria = (trabajador.borrador_reporte as any) || {}
     
-    // Filtro anti-duplicados de Meta
     if (rawMemoria.last_msg_id === message.id) return NextResponse.json({ status: 'ignored_duplicate' })
 
     const memoria: MemoriaConversacion = {
@@ -62,31 +61,33 @@ export async function POST(req: Request) {
     const textoCrudo = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || ''
     const textoLimpio = normalizarTexto(textoCrudo)
     
+    // MENSAJES DEL SISTEMA LIMPIOS (SIN EL "DON")
     if (/\b(reiniciar|empezar de nuevo|borrar todo|corregir)\b/i.test(textoLimpio)) {
       await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id } }).eq('id', trabajador.id)
-      await enviarWhatsApp(from, `🔄 Listo Don ${nombreOperador}, sistema destrabado. ¿Qué novedades tenemos?`)
+      await enviarWhatsApp(from, `🔄 Listo ${nombreOperador}, sistema destrabado. ¿Qué novedades tenemos?`)
       return NextResponse.json({ status: 'reset_flow' })
     }
 
     const esSaludo = /\b(hola|ola|holi|oli|buenas|buenos dias|buenas tardes|buenas noches|que mas|saludos|confirmar recepcion|recepcion)\b/i.test(textoLimpio)
+    
     if ((message.type === 'button' || message.type === 'interactive' || esSaludo) && (estadoActual === 'inactivo' || estadoActual === 'esperando_reporte')) {
       await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id } }).eq('id', trabajador.id)
-      await enviarWhatsApp(from, `👋 ¡Hola Don ${nombreOperador}! Te saluda el Asistente de Operaciones de *JHF Perforaciones S.A.S.*\n\n¿Cómo les fue hoy en *${frenteNombre}*?\n\nCuéntame cómo avanzaron o si tuvieron novedades (lluvia, SST o varadas).`)
+      await enviarWhatsApp(from, `👋 ¡Hola ${nombreOperador}! Te saluda el Asistente de Operaciones de *JHF Perforaciones S.A.S.*\n\n¿Cómo les fue hoy en *${frenteNombre}*?\n\nCuéntame cómo avanzaron o si tuvieron novedades.`)
       return NextResponse.json({ status: 'welcome_sent' })
     }
 
     if (message.type === 'audio' || message.type === 'voice') {
-      await enviarWhatsApp(from, `👋 Don ${nombreOperador}, por ahora no puedo escuchar audios. Escríbame porfa un mensajito con el reporte.`)
+      await enviarWhatsApp(from, `👋 ${nombreOperador}, por ahora no puedo escuchar audios. Escríbame porfa un mensajito con el reporte.`)
       return NextResponse.json({ status: 'audio_rejected' })
     }
     if (message.type === 'image') {
-      await enviarWhatsApp(from, `📷 ¡Foto recibida, Don ${nombreOperador}! Queda registrada como soporte en la bitácora.`)
+      await enviarWhatsApp(from, `📷 ¡Foto recibida, ${nombreOperador}! Queda registrada como soporte en la bitácora.`)
       return NextResponse.json({ status: 'image_received' })
     }
 
     if (message.type === 'text') {
       if (estadoActual === 'inactivo' && esDespedidaOInterjeccion(textoLimpio)) {
-        await enviarWhatsApp(from, `🙏 ¡Con todo el gusto Don ${nombreOperador}! Buen descanso.`)
+        await enviarWhatsApp(from, `🙏 ¡Con todo el gusto, ${nombreOperador}! Buen descanso.`)
         return NextResponse.json({ status: 'closed_courtesy' })
       }
 
@@ -109,6 +110,7 @@ export async function POST(req: Request) {
       const nuevaMemoria: MemoriaConversacion = {
         datos: { ...(memoria.datos || {}), ...decisionIA.datos_actualizados }, historial: historialActualizado.slice(-8), last_msg_id: message.id
       }
+      
       await supabase.from('trabajadores').update({
         estado_conversacion: decisionIA.accion === 'pedir_confirmacion' ? 'esperando_confirmacion' : 'conversando', borrador_reporte: nuevaMemoria
       }).eq('id', trabajador.id)
@@ -144,24 +146,29 @@ async function consultarGroq(mensaje: string, operador: string, frente: string, 
   const groqKey = (process.env.GROQ_API_KEY || '').trim()
   if (!groqKey) return { accion: 'conversar', respuesta_whatsapp: `🛠️ ERROR VERCEL: Llave GROQ_API_KEY no encontrada.`, datos_actualizados: datosPrevios }
 
+  // PROMPT LIBERADO Y NATURAL
   const prompt = `
-Eres el Asistente Técnico de Operaciones de "JHF Perforaciones S.A.S." en Colombia. Hablas con "Don ${operador}" en el proyecto "${frente}".
-OBJETIVO: Recolectar la bitácora operativa diaria.
+Eres el Asistente Técnico de Operaciones de JHF Perforaciones S.A.S. en Colombia.
+Estás hablando por WhatsApp con el operador: "${operador}" que trabaja en el proyecto "${frente}".
 
-DIRECTRICES:
-1. NOVEDADES Y STANDBY: Si reportan lluvia, daños o paros SST sin avance: metros = 0, tipo = "standby". Responde con empatía técnica y pide confirmación.
-2. OPERACIONES: "Prehueco/PQ/Ensanche" = pilote. "Sondeo" = estudio_suelo.
-3. PUNTOS: Si no lo saben = "P-01 (Por verificar)".
-4. CONFIRMACIÓN: Resume la información y pide confirmación (accion="pedir_confirmacion"). Si aprueba ("sí", "ok"), accion="guardar_reporte".
-5. TEMAS ADMINISTRATIVOS: Si preguntan por viáticos, pagos o permisos, diles cortésmente que solo manejas reportes técnicos de obra y que contacten a la oficina. Luego pregúntales por el reporte técnico.
+TU PROPÓSITO:
+Eres un compañero de trabajo natural, empático y directo. Tu ÚNICO objetivo es entender qué se hizo hoy en la obra y recolectar los datos para la bitácora. 
+
+CÓMO DEBES ACTUAR:
+- Sé conversacional y fluido. Llama a la persona por su nombre ("${operador}"). NUNCA uses la palabra "Don" ni "Doña".
+- Tienes sentido común: Si te dan un contexto enredado (ej. "llevo 15 metros en el pilote A, pero hoy le metí 2 al pilote B"), extrae mentalmente SOLO el avance de HOY (2 metros) y guarda toda la historia como contexto en tus "observaciones".
+- Criterio técnico: Si hablan de "Prehueco", "PQ" o "Ensanche", clasifícalo como "pilote". Si es "Sondeo", es "estudio_suelo".
+- Novedades: Si reportan lluvia, daños o pausas, asume que los metros de hoy son 0 y el tipo es "standby". 
+- Distracciones: Si te hablan de plata, permisos o viáticos, diles cordialmente que tú solo consolidas reportes técnicos y que hablen con la oficina. Inmediatamente después, vuelve a tu objetivo: preguntar por el avance de hoy.
+- Cierre: Cuando tengas claro el resumen de hoy, preséntaselo al operador de forma clara y pídele que te lo confirme. Si el operador te confirma ("sí", "listo", "ok", "sisas"), tu acción debe cambiar a "guardar_reporte".
 
 DATOS PREVIOS: ${JSON.stringify(datosPrevios)}
-HISTORIAL: ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
+HISTORIAL DE LA CONVERSACIÓN: ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
 
 RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
 {
   "accion": "conversar" | "pedir_confirmacion" | "guardar_reporte",
-  "respuesta_whatsapp": "Texto para WhatsApp",
+  "respuesta_whatsapp": "Tu respuesta natural y conversacional aquí...",
   "datos_actualizados": {
     "tipo": "estudio_suelo" | "pilote" | "standby" | "logistica",
     "sondeo": string | null,
@@ -176,8 +183,6 @@ RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
 }
 `
   let logErrores = []
-  
-  // Modelos oficiales vigentes y recomendados por Groq
   const modelos = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b']
 
   for (const modelo of modelos) {
@@ -187,19 +192,8 @@ RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
 
       const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
-        headers: { 
-          'Authorization': `Bearer ${groqKey}`, 
-          'Content-Type': 'application/json' 
-        },
-        body: JSON.stringify({ 
-          model: modelo, 
-          messages: [
-            { role: 'system', content: prompt }, 
-            { role: 'user', content: mensaje }
-          ], 
-          response_format: { type: 'json_object' }, 
-          temperature: 0.1 
-        }),
+        headers: { 'Authorization': `Bearer ${groqKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: modelo, messages: [{ role: 'system', content: prompt }, { role: 'user', content: mensaje }], response_format: { type: 'json_object' }, temperature: 0.1 }),
         signal: controller.signal
       })
       clearTimeout(timeoutId)
@@ -210,26 +204,26 @@ RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
         raw = raw.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim()
         if (raw) {
           const parsed = JSON.parse(raw)
-          return { 
-            accion: parsed.accion || 'conversar', 
-            respuesta_whatsapp: parsed.respuesta_whatsapp || '', 
-            datos_actualizados: (parsed.datos_actualizados || {}) as DatosReporte 
-          }
+          return { accion: parsed.accion || 'conversar', respuesta_whatsapp: parsed.respuesta_whatsapp || '', datos_actualizados: (parsed.datos_actualizados || {}) as DatosReporte }
         }
       } else {
         const data = await res.json()
-        logErrores.push(`[${modelo}: ${res.status}]${JSON.stringify(data.error?.message || 'error')}`)
+        logErrores.push(`[${modelo}:${res.status}]`)
       }
     } catch (e: any) {
-      logErrores.push(`[${modelo}: timeout/red]${e.message}`)
+      logErrores.push(`[${modelo}: timeout]`)
     }
   }
 
-  return { accion: 'conversar', respuesta_whatsapp: `🛠️ ERROR GROQ: ${logErrores.join(' | ')}`, datos_actualizados: datosPrevios }
+  return { accion: 'conversar', respuesta_whatsapp: `⏳ ${operador}, dame un segundito que el sistema está guardando los datos. Vuelve a enviarme tu último mensaje porfa.`, datos_actualizados: datosPrevios }
 }
 
 function normalizarTexto(t: string): string { return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim() }
-function esDespedidaOInterjeccion(limpio: string): boolean { return /^(gracias|ok gracias|muchas gracias|feliz noche|buenas noches|chao|amen|nos vemos|👍|🙏|hasta luego)$/i.test(limpio) }
+
+function esDespedidaOInterjeccion(limpio: string): boolean { 
+  return /(gracias|feliz noche|buenas noches|chao|amen|nos vemos|👍|🙏|hasta luego|descansa)/i.test(limpio) 
+}
+
 async function enviarWhatsApp(to: string, text: string) {
   const token = (process.env.WHATSAPP_ACCESS_TOKEN || '').replace(/['"]/g, '').trim()
   if (!token) return
