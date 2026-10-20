@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
 
-// 🚨 LIMPIADOR Y BLOQUEADOR DE CACHÉ DE VERCEL 🚨
 export const dynamic = 'force-dynamic'
 export const fetchCache = 'force-no-store'
 
@@ -9,21 +8,7 @@ const META_VERIFY_TOKEN = 'clave_secreta_reportes_2026'
 const META_MESSAGES_URL = 'https://graph.facebook.com/v19.0/1370874296109664/messages'
 const NUMERO_JEFATURA = '573103953485'
 
-type TipoOperacion = 'estudio_suelo' | 'pilote' | 'standby' | 'logistica'
-interface MensajeHistorial { role: string; text: string }
-
-interface DatosReporte {
-  tipo?: TipoOperacion; sondeo?: string | null; pilote?: string | null;
-  metros?: number | null; pq?: number | null; ensanche?: number | null;
-  encamisado?: number | null; ensayos_spt?: number | null; observaciones?: string | null;
-}
-
-interface MemoriaConversacion { 
-  datos?: DatosReporte; 
-  historial?: MensajeHistorial[]; 
-  last_msg_id?: string;
-  alerta_enviada?: boolean; 
-}
+type MensajeHistorial = { role: string; text: string }
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
@@ -62,12 +47,15 @@ export async function POST(req: Request) {
     const estadoActual = trabajador.estado_conversacion || 'inactivo'
     const rawMemoria = (trabajador.borrador_reporte as any) || {}
     
-    // Escudo anti-duplicados de Meta
+    // EVITAR DUPLICADOS DE META
     if (rawMemoria.last_msg_id === message.id) return NextResponse.json({ status: 'ignored_duplicate' })
 
     // HORA BOGOTÁ Y DOMINGOS
     const horaBogota = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Bogota" }))
     const esDomingo = horaBogota.getDay() === 0
+    const horaDecimal = horaBogota.getHours() + (horaBogota.getMinutes() / 60)
+    const esHoraReporte = horaDecimal >= 16.5 // Desde las 4:30 p.m.
+    const horaFormateada = horaBogota.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
 
     // MEMORIA DEL AYER
     const { data: reportesAnt } = await supabase.from('reportes_operativos')
@@ -75,92 +63,110 @@ export async function POST(req: Request) {
       .order('created_at', { ascending: false }).limit(1)
     const reporteAyer = reportesAnt?.[0] || null
 
-    const memoria: MemoriaConversacion = {
-      datos: rawMemoria.datos || (rawMemoria.tipo ? rawMemoria : {}),
-      historial: Array.isArray(rawMemoria.historial) ? rawMemoria.historial : [],
-      alerta_enviada: rawMemoria.alerta_enviada || false
-    }
-
     const textoCrudo = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || ''
     const textoLimpio = normalizarTexto(textoCrudo)
-    
-    // 1. COMANDO REINICIAR FORZADO
+
+    // 1. REINICIAR
     if (/\b(reiniciar|empezar de nuevo|borrar todo|corregir)\b/i.test(textoLimpio)) {
       await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id, alerta_enviada: false } }).eq('id', trabajador.id)
       await enviarWhatsApp(from, `🔄 Listo ${nombreOperador}, bitácora en blanco. Arranquemos, ¿cómo nos fue hoy?`)
       return NextResponse.json({ status: 'reset_flow' })
     }
 
-    // 2. MATAR BUCLES DE DESPEDIDA
-    if (estadoActual === 'inactivo' && textoLimpio.length < 25 && /\b(ok|listo|gracias|amén|amen|chao|feliz noche|buenas noches|buena noche|👍|🙏)\b/i.test(textoLimpio)) {
-      return NextResponse.json({ status: 'ignored_courtesy_loop' })
-    }
-
-    // 3. DISPARADORES DE NUEVA CONVERSACIÓN (AQUÍ ESTÁ LA MAGIA REPARADA)
-    const esBotonMeta = message.type === 'button' || message.type === 'interactive' || textoLimpio.includes('confirmar recepcion');
-    const esSaludo = /\b(hola|ola|holi|oli|buenas|buenos dias|buenas tardes|que mas|saludos|reporte)\b/i.test(textoLimpio);
+    // 2. DISPARADOR INICIAL O SALUDO (Botón Meta o saludo inactivo)
+    const esBotonMeta = message.type === 'button' || message.type === 'interactive' || textoLimpio.includes('confirmar recepcion')
+    const esSaludo = textoLimpio.length <= 15 && /\b(hola|ola|buenas|que mas|saludos)\b/i.test(textoLimpio)
     
-    if (esBotonMeta || (esSaludo && (estadoActual === 'inactivo' || estadoActual === 'esperando_reporte'))) {
+    if (esBotonMeta || (esSaludo && estadoActual === 'inactivo')) {
       await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id, alerta_enviada: false } }).eq('id', trabajador.id)
       
       let msjArranque = `👋 ¡Hola ${nombreOperador}! Espero que todo haya salido excelente en *${frenteNombre}* hoy.\n\n`
       if (tipoProyecto.toLowerCase().includes('pilote')) {
         msjArranque += `Cuéntame, ¿en qué número de pilote estuvimos dándole hoy y cómo estuvo el avance?`
-      } else if (tipoProyecto.toLowerCase().includes('suelo') || tipoProyecto.toLowerCase().includes('sondeo')) {
-        msjArranque += `Cuéntame, ¿en qué número de sondeo estuvimos trabajando y cuántos metros logramos?`
       } else {
-        msjArranque += `Cuéntame, ¿qué logramos avanzar hoy o tuvimos alguna novedad?`
+        msjArranque += `Cuéntame, ¿en qué número de sondeo estuvimos trabajando y cuántos metros logramos?`
       }
-      
+      if (reporteAyer) {
+        const obs = reporteAyer.observaciones ? ` (Ayer reportaste: "${reporteAyer.observaciones}")` : ''
+        msjArranque += obs
+      }
       await enviarWhatsApp(from, msjArranque)
       return NextResponse.json({ status: 'welcome_sent' })
     }
 
-    // 4. MULTIMEDIA
+    // 3. IGNORAR BUCLES DE DESPEDIDA
+    if (estadoActual === 'inactivo' && textoLimpio.length < 25 && /\b(ok|listo|gracias|amén|amen|chao|feliz noche|buenas noches|buena noche|👍|🙏)\b/i.test(textoLimpio)) {
+      return NextResponse.json({ status: 'ignored_courtesy_loop' })
+    }
+
+    // MULTIMEDIA
     if (message.type === 'audio' || message.type === 'voice') {
-      await enviarWhatsApp(from, `¡Qué pena ${nombreOperador}! Por ahora no puedo escuchar audios. Escríbemelo en un mensajito corto, porfa.`)
+      await enviarWhatsApp(from, `¡Qué pena ${nombreOperador}! Por ahora no escucho audios. Escríbemelo, porfa.`)
       return NextResponse.json({ status: 'audio_rejected' })
     }
     if (message.type === 'image') {
-      await enviarWhatsApp(from, `📷 Foto recibida y guardada en la bitácora.`)
+      await enviarWhatsApp(from, `📷 Foto recibida y guardada como soporte.`)
       return NextResponse.json({ status: 'image_received' })
     }
 
-    // 5. FLUJO DE INTELIGENCIA
+    // 4. PILAR 1: EL AMORTIGUADOR DE 3 SEGUNDOS (EFECTO AMETRALLADORA)
     if (message.type === 'text') {
-      await supabase.from('trabajadores').update({ borrador_reporte: { ...rawMemoria, last_msg_id: message.id } }).eq('id', trabajador.id)
+      const historial = Array.isArray(rawMemoria.historial) ? rawMemoria.historial : []
       const nuevoItem: MensajeHistorial = { role: 'user', text: textoCrudo }
-      const historialActualizado: MensajeHistorial[] = [...(memoria.historial || []), nuevoItem].slice(-10)
+      const historialActualizado = [...historial, nuevoItem].slice(-15) // Guardamos hasta 15 mensajes
 
-      const decisionIA = await consultarGroq(textoCrudo, nombreOperador, frenteNombre, tipoProyecto, memoria.datos || {}, historialActualizado, esDomingo, reporteAyer)
+      const nuevaMemoria = {
+        datos: rawMemoria.datos || {},
+        historial: historialActualizado,
+        last_msg_id: message.id,
+        alerta_enviada: rawMemoria.alerta_enviada || false
+      }
+      
+      // Guardamos este mensaje en la base de datos
+      await supabase.from('trabajadores').update({ borrador_reporte: nuevaMemoria }).eq('id', trabajador.id)
 
-      if (decisionIA.alerta_jefatura && !memoria.alerta_enviada) {
-        await enviarWhatsApp(NUMERO_JEFATURA, `🚨 *ALERTA DE OBRA* 🚨\nEl perforador *${nombreOperador}* en *${frenteNombre}* acaba de reportar una novedad crítica o un trabajo dominical no autorizado.\n\n*Mensaje del operador:* "${textoCrudo}"`)
-        memoria.alerta_enviada = true 
+      // ESPERAMOS 3 SEGUNDOS
+      await new Promise(resolve => setTimeout(resolve, 3000))
+
+      // REVISAMOS SI ENTRÓ OTRO MENSAJE MIENTRAS ESPERÁBAMOS
+      const { data: checkData } = await supabase.from('trabajadores').select('borrador_reporte').eq('id', trabajador.id).single()
+      if (checkData?.borrador_reporte?.last_msg_id !== message.id) {
+        // Otro mensaje entró. Nos apagamos silenciosamente y dejamos que el último mensaje haga el trabajo
+        console.log('Amortiguador activado: mensaje superado por uno más reciente.')
+        return NextResponse.json({ status: 'superseded_by_newer_message' })
       }
 
+      // 5. FLUJO DE INTELIGENCIA (Solo el último mensaje de la ráfaga llega aquí, con todo el historial)
+      const decisionIA = await consultarGroq(textoCrudo, nombreOperador, frenteNombre, tipoProyecto, checkData.borrador_reporte.datos || {}, checkData.borrador_reporte.historial, esDomingo, reporteAyer, horaFormateada, esHoraReporte)
+
+      // ALERTA JEFATURA
+      if (decisionIA.alerta_jefatura && !checkData.borrador_reporte.alerta_enviada) {
+        await enviarWhatsApp(NUMERO_JEFATURA, `🚨 *ALERTA DE OBRA* 🚨\nEl perforador *${nombreOperador}* en *${frenteNombre}* reporta novedad crítica/dominical.\n\n*Mensaje:* "${textoCrudo}"`)
+        nuevaMemoria.alerta_enviada = true
+      }
+
+      // POSPUESTO
       if (decisionIA.posponer_reporte) {
-        await supabase.from('trabajadores').update({ estado_conversacion: 'pospuesto', borrador_reporte: { datos: decisionIA.datos_actualizados, historial: historialActualizado, last_msg_id: message.id, alerta_enviada: memoria.alerta_enviada } }).eq('id', trabajador.id)
+        await supabase.from('trabajadores').update({ estado_conversacion: 'pospuesto', borrador_reporte: { datos: decisionIA, historial: checkData.borrador_reporte.historial, last_msg_id: message.id, alerta_enviada: nuevaMemoria.alerta_enviada } }).eq('id', trabajador.id)
         await enviarWhatsApp(from, decisionIA.respuesta_whatsapp)
         return NextResponse.json({ status: 'postponed' })
       }
 
+      // GUARDAR REPORTE
       if (decisionIA.accion === 'guardar_reporte') {
-        const d = { ...(memoria.datos || {}), ...decisionIA.datos_actualizados }
-        await guardarOActualizarReporte(trabajador, d, textoCrudo)
+        await guardarOActualizarReporte(trabajador, decisionIA, textoCrudo)
         await supabase.from('trabajadores').update({ estado_conversacion: 'inactivo', borrador_reporte: null }).eq('id', trabajador.id)
         await enviarWhatsApp(from, decisionIA.respuesta_whatsapp)
         return NextResponse.json({ status: 'saved_by_ai' })
       }
 
+      // CONTINUAR CONVERSACIÓN
       const respuestaItem: MensajeHistorial = { role: 'model', text: decisionIA.respuesta_whatsapp }
-      historialActualizado.push(respuestaItem)
-      const nuevaMemoria: MemoriaConversacion = {
-        datos: { ...(memoria.datos || {}), ...decisionIA.datos_actualizados }, historial: historialActualizado.slice(-10), last_msg_id: message.id, alerta_enviada: memoria.alerta_enviada
-      }
+      const historialFinal = [...checkData.borrador_reporte.historial, respuestaItem].slice(-15)
       
       await supabase.from('trabajadores').update({
-        estado_conversacion: decisionIA.accion === 'pedir_confirmacion' ? 'esperando_confirmacion' : 'conversando', borrador_reporte: nuevaMemoria
+        estado_conversacion: decisionIA.accion === 'pedir_confirmacion' ? 'esperando_confirmacion' : 'conversando', 
+        borrador_reporte: { datos: decisionIA, historial: historialFinal, last_msg_id: message.id, alerta_enviada: nuevaMemoria.alerta_enviada }
       }).eq('id', trabajador.id)
 
       await enviarWhatsApp(from, decisionIA.respuesta_whatsapp)
@@ -173,16 +179,30 @@ export async function POST(req: Request) {
   }
 }
 
-async function guardarOActualizarReporte(trabajador: any, d: DatosReporte, textoCrudo: string) {
+async function guardarOActualizarReporte(trabajador: any, decisionIA: any, textoCrudo: string) {
   const hoy = new Date()
   hoy.setHours(0, 0, 0, 0)
+  const pto = decisionIA.estado_punto || {}
+  const avance = decisionIA.avance_hoy || {}
+  
   const { data: existentes } = await supabase.from('reportes_operativos').select('id').eq('trabajador_id', trabajador.id).gte('created_at', hoy.toISOString()).order('created_at', { ascending: false }).limit(1)
-  const tipoFinal: TipoOperacion = d.tipo || (d.metros === 0 && d.observaciones ? 'standby' : d.pilote || d.pq || d.ensanche ? 'pilote' : 'estudio_suelo')
+  
   const payload = {
     trabajador_id: trabajador.id, proyecto_id: trabajador.proyecto_id, trabajador_nombre: trabajador.nombre,
-    proyecto_nombre: trabajador.proyectos?.nombre || 'General', tipo_operacion: tipoFinal, sondeo: d.sondeo || null, pilote: d.pilote || null, metros_nq: d.metros || 0,
-    avance_pq: d.pq || 0, ensanche: d.ensanche || 0, encamisado: d.encamisado || 0, ensayos_spt: d.ensayos_spt || 0, observaciones: d.observaciones || textoCrudo, confirmado: true
+    proyecto_nombre: trabajador.proyectos?.nombre || 'General', 
+    tipo_operacion: avance.tipo || 'pilote', 
+    sondeo: (avance.tipo === 'estudio_suelo') ? pto.numero_punto : null, 
+    pilote: (avance.tipo === 'pilote') ? pto.numero_punto : null, 
+    metros_nq: avance.metros_nq_spt || 0,
+    avance_pq: avance.metros_pq || 0, 
+    ensanche: avance.metros_ensanche || 0, 
+    encamisado: avance.metros_camisa || 0, 
+    ensayos_spt: avance.metros_nq_spt || 0, 
+    profundidad_total_pilote: pto.profundidad_diseno || 0,
+    observaciones: avance.observaciones || textoCrudo, 
+    confirmado: true
   }
+  
   if (existentes && existentes.length > 0) {
     await supabase.from('reportes_operativos').update(payload).eq('id', existentes[0].id)
   } else {
@@ -190,31 +210,37 @@ async function guardarOActualizarReporte(trabajador: any, d: DatosReporte, texto
   }
 }
 
-async function consultarGroq(mensaje: string, operador: string, frente: string, tipoProyecto: string, datosPrevios: DatosReporte, historial: MensajeHistorial[], esDomingo: boolean, reporteAyer: any) {
+async function consultarGroq(mensaje: string, operador: string, frente: string, tipoProyecto: string, datosPrevios: any, historial: MensajeHistorial[], esDomingo: boolean, reporteAyer: any, horaFormateada: string, esHoraReporte: boolean) {
   const groqKey = (process.env.GROQ_API_KEY || '').trim()
-  if (!groqKey) return { accion: 'conversar', respuesta_whatsapp: `⏳ Hubo un error de conexión, ${operador}.`, datos_actualizados: datosPrevios, alerta_jefatura: false, posponer_reporte: false }
+  if (!groqKey) return { accion: 'conversar', respuesta_whatsapp: `⏳ Hubo un error de conexión, ${operador}.`, alerta_jefatura: false, posponer_reporte: false }
 
   const prompt = `
 Eres el Asistente de Bitácoras de JHF Perforaciones. Hablas por WhatsApp con el perforador "${operador}".
-Tono: Cálido, ameno, natural y fluido. Nada militar ni robótico. PROHIBIDO usar "Don", "Doña" o "QAP". PROHIBIDO saludar múltiples veces en la misma conversación.
+Tono: Colega de obra natural y fluido. PROHIBIDO usar "Don", "Doña" o "QAP".
 
 CONTEXTO DEL SISTEMA:
-- Proyecto: ${frente}
-- Tipo de Proyecto (Base de datos): ${tipoProyecto}
-- HOY ES DOMINGO O FESTIVO: ${esDomingo ? 'SÍ' : 'NO'}
-- REPORTE AYER: ${reporteAyer ? JSON.stringify(reporteAyer) : 'No hay.'}
+- Proyecto: ${frente} (Tipo: ${tipoProyecto})
+- Reloj en Obra: ${horaFormateada} -> ${esHoraReporte ? 'ES HORA DE REPORTE (Cierre del día)' : 'ES TEMPRANO (Jornada en curso)'}
+- HOY ES DOMINGO: ${esDomingo ? 'SÍ' : 'NO'}
+- REPORTE DE AYER: ${reporteAyer ? JSON.stringify(reporteAyer) : 'No hay.'}
 
-REGLAS ESTRICTAS DE OPERACIÓN:
-1. TRABAJO DOMINICAL: Si HOY ES DOMINGO es SÍ, vuélvete un auditor. Dile: "Un momento ${operador}, no tenías aprobado trabajo dominical. ¿Quién autorizó esto? Para registrar esta novedad, envíame ya mismo dos fotografías (ingreso y salida) donde se vean los rostros, fecha, hora local y ubicación." Activa "alerta_jefatura": true.
-2. TODAVÍA NO TERMINO (Pospuesto): Si el operador dice "aún no acabo", "estoy dándole", "espéreme", dile: "¡Tranquilo, hágale! Escríbame por aquí cuando termine y cerramos el reporte." Activa "posponer_reporte": true.
-3. NOVEDADES CRÍTICAS (Alerta): Si reportan daño de máquina (varada), lluvia, o paro SISO, dales ánimo, activa "alerta_jefatura": true. Si el operador reporta temprano, pregúntale: "¿Cerramos el reporte aquí o quedo pendiente por si logran avanzar más tarde?". Si dice que ya se cerró, asume metros=0 y tipo="standby".
-4. ARREPENTIMIENTO: Si el operador te corrige un dato anterior, dile "Claro que sí, lo actualizamos. ¿Cómo quedan los datos reales?".
-5. MENSAJES EN PEDAZOS: Los operadores escriben corto. Lee el historial para entender todo el contexto antes de responder.
-6. MATEMÁTICA DE PILOTES (SI EL PROYECTO ES PILOTES): Si dice "avancé 4 metros", NO TIENES LOS DATOS COMPLETOS. Debes indagar con naturalidad: "¿Fueron 4 metros de prehueco, ensanche o metiendo camisa? ¿De cuántos metros va a quedar el pilote en total?". EXTRAE SOLO LO DE HOY, y anota el acumulado en observaciones.
-7. CIERRE: Solo cuando tengas TODOS los datos (si es pilote: prehueco, camisa, ensanche, profundidad total), haz un resumen amable en texto, mételo en "observaciones" del JSON, pide confirmación y pon accion="pedir_confirmacion". Si responden "sí", "ok" o "listo", pon accion="guardar_reporte" y despídete amablemente de forma breve.
+REGLAS DE INGENIERÍA (NUEVA LÓGICA DE 6 PILARES):
+1. TRABAJO DOMINICAL: Si HOY ES DOMINGO es SÍ, vuélvete un auditor estricto. Pide justificación y dos fotografías (ingreso/salida). Activa "alerta_jefatura": true.
+2. TODAVÍA NO TERMINO (Pospuesto): Si el operador dice "aún no acabo" o "espéreme", dile: "¡Hágale! Escríbame por aquí cuando termine." Activa "posponer_reporte": true.
+3. CONCIENCIA DEL RELOJ Y NOVEDADES: Si reportan varada, lluvia o SISO y ES TEMPRANO, dales ánimo, activa "alerta_jefatura": true, y pregunta: "¿Con esto cerramos el reporte de hoy o quedo pendiente por si logran avanzar?". Si ES HORA DE REPORTE, pregúntales cómo les terminó de ir con esa novedad en la tarde.
+4. ARREPENTIMIENTO (MENSAJES EN PEDAZOS): Tienes el historial de todo lo que el usuario ha dicho. Si el operador te corrige un dato, ACATALO, los datos nuevos reemplazan a los viejos.
+5. CEROS IMPLÍCITOS Y SALIDA DE EMERGENCIA (¡MUY IMPORTANTE!): 
+   - Si el operador te dice "hice 3m de camisa", ASUME INTELIGENTEMENTE que prehueco y ensanche fueron 0. NO le preguntes por las otras fases, no lo interrogues.
+   - Si el operador dice "No me sé el número del pilote", NO lo bloquees. Pon en numero_punto: "Pilote Pendiente" y permítele cerrar el reporte.
+6. DOS GAVETAS (Estado vs Avance de HOY): 
+   En tu JSON de salida tienes "estado_punto" (el contexto general) y "avance_hoy" (SOLO LO QUE SE HIZO HOY). 
+   - Extrae inteligentemente lo que se avanzó hoy y ponlo en "avance_hoy".
+   - Todo el contexto histórico, sumas o comentarios de ayer ponlos en "observaciones".
+7. CIERRE SILENCIOSO: Haz un resumen amable en texto, pide confirmación y pon accion="pedir_confirmacion". Si responden que SÍ, pon accion="guardar_reporte".
 
-DATOS RECOLECTADOS HOY: ${JSON.stringify(datosPrevios)}
-HISTORIAL RECIENTE: ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
+DATOS PREVIOS EN EL BORRADOR (Úsalos para no olvidar lo que ya te dijeron hoy): ${JSON.stringify(datosPrevios)}
+HISTORIAL DE CHAT RECIENTE (Aquí están los mensajes del operador):
+${historial.map(h => `${h.role}:${h.text}`).join('\n')}
 
 RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
 {
@@ -222,15 +248,18 @@ RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
   "respuesta_whatsapp": "Tu respuesta aquí...",
   "alerta_jefatura": boolean,
   "posponer_reporte": boolean,
-  "datos_actualizados": {
-    "tipo": "estudio_suelo" | "pilote" | "standby" | "logistica",
-    "sondeo": string | null,
-    "pilote": string | null,
-    "metros": number | null,
-    "pq": number | null,
-    "ensanche": number | null,
-    "encamisado": number | null,
-    "ensayos_spt": number | null,
+  "estado_punto": {
+    "numero_punto": string | null,
+    "profundidad_diseno": number | null,
+    "acumulado_previo": string | null,
+    "estado": "en_progreso" | "finalizado" | "pendiente_info"
+  },
+  "avance_hoy": {
+    "tipo": "pilote" | "estudio_suelo" | "standby" | "logistica",
+    "metros_pq": number | null,
+    "metros_ensanche": number | null,
+    "metros_camisa": number | null,
+    "metros_nq_spt": number | null,
     "observaciones": string | null
   }
 }
@@ -241,7 +270,7 @@ RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
   for (const modelo of modelos) {
     try {
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 7500)
+      const timeoutId = setTimeout(() => controller.abort(), 8500) // Le damos un segundo más al LLM por si acaso
 
       const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
@@ -262,7 +291,8 @@ RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
             respuesta_whatsapp: parsed.respuesta_whatsapp || '', 
             alerta_jefatura: !!parsed.alerta_jefatura,
             posponer_reporte: !!parsed.posponer_reporte,
-            datos_actualizados: (parsed.datos_actualizados || {}) as DatosReporte 
+            estado_punto: parsed.estado_punto || {},
+            avance_hoy: parsed.avance_hoy || {}
           }
         }
       } else {
@@ -274,7 +304,7 @@ RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
     }
   }
 
-  return { accion: 'conversar', respuesta_whatsapp: `⏳ Denme un segundito que el sistema central está guardando los datos. Vuelva a enviarme este último mensaje porfa.`, alerta_jefatura: false, posponer_reporte: false, datos_actualizados: datosPrevios }
+  return { accion: 'conversar', respuesta_whatsapp: `⏳ Denme un segundito que el sistema central está guardando los datos. Vuelva a enviarme este último mensaje porfa.`, alerta_jefatura: false, posponer_reporte: false }
 }
 
 function normalizarTexto(t: string): string { return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim() }
