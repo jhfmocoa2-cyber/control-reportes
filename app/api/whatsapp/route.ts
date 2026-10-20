@@ -73,7 +73,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'reset_flow' })
     }
 
-    // 2. DISPARADOR INICIAL O SALUDO (Botón Meta o saludo inactivo)
+    // 2. DISPARADOR INICIAL O SALUDO
     const esBotonMeta = message.type === 'button' || message.type === 'interactive' || textoLimpio.includes('confirmar recepcion')
     const esSaludo = textoLimpio.length <= 15 && /\b(hola|ola|buenas|que mas|saludos)\b/i.test(textoLimpio)
     
@@ -109,11 +109,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'image_received' })
     }
 
-    // 4. PILAR 1: EL AMORTIGUADOR DE 3 SEGUNDOS (EFECTO AMETRALLADORA)
+    // 4. PILAR 1: EL AMORTIGUADOR DE 3 SEGUNDOS
     if (message.type === 'text') {
       const historial = Array.isArray(rawMemoria.historial) ? rawMemoria.historial : []
       const nuevoItem: MensajeHistorial = { role: 'user', text: textoCrudo }
-      const historialActualizado = [...historial, nuevoItem].slice(-15) // Guardamos hasta 15 mensajes
+      const historialActualizado = [...historial, nuevoItem].slice(-15)
 
       const nuevaMemoria = {
         datos: rawMemoria.datos || {},
@@ -122,32 +122,33 @@ export async function POST(req: Request) {
         alerta_enviada: rawMemoria.alerta_enviada || false
       }
       
-      // Guardamos este mensaje en la base de datos
       await supabase.from('trabajadores').update({ borrador_reporte: nuevaMemoria }).eq('id', trabajador.id)
 
       // ESPERAMOS 3 SEGUNDOS
       await new Promise(resolve => setTimeout(resolve, 3000))
 
-      // REVISAMOS SI ENTRÓ OTRO MENSAJE MIENTRAS ESPERÁBAMOS
+      // REVISAMOS SI ENTRÓ OTRO MENSAJE CON ESCUDO NULL-CHECK DE TYPESCRIPT
       const { data: checkData } = await supabase.from('trabajadores').select('borrador_reporte').eq('id', trabajador.id).single()
-      if (checkData?.borrador_reporte?.last_msg_id !== message.id) {
-        // Otro mensaje entró. Nos apagamos silenciosamente y dejamos que el último mensaje haga el trabajo
+      
+      const currentBorrador = checkData?.borrador_reporte || nuevaMemoria
+
+      if (currentBorrador.last_msg_id !== message.id) {
         console.log('Amortiguador activado: mensaje superado por uno más reciente.')
         return NextResponse.json({ status: 'superseded_by_newer_message' })
       }
 
-      // 5. FLUJO DE INTELIGENCIA (Solo el último mensaje de la ráfaga llega aquí, con todo el historial)
-      const decisionIA = await consultarGroq(textoCrudo, nombreOperador, frenteNombre, tipoProyecto, checkData.borrador_reporte.datos || {}, checkData.borrador_reporte.historial, esDomingo, reporteAyer, horaFormateada, esHoraReporte)
+      // 5. FLUJO DE INTELIGENCIA
+      const decisionIA = await consultarGroq(textoCrudo, nombreOperador, frenteNombre, tipoProyecto, currentBorrador.datos || {}, currentBorrador.historial || [], esDomingo, reporteAyer, horaFormateada, esHoraReporte)
 
       // ALERTA JEFATURA
-      if (decisionIA.alerta_jefatura && !checkData.borrador_reporte.alerta_enviada) {
+      if (decisionIA.alerta_jefatura && !currentBorrador.alerta_enviada) {
         await enviarWhatsApp(NUMERO_JEFATURA, `🚨 *ALERTA DE OBRA* 🚨\nEl perforador *${nombreOperador}* en *${frenteNombre}* reporta novedad crítica/dominical.\n\n*Mensaje:* "${textoCrudo}"`)
         nuevaMemoria.alerta_enviada = true
       }
 
       // POSPUESTO
       if (decisionIA.posponer_reporte) {
-        await supabase.from('trabajadores').update({ estado_conversacion: 'pospuesto', borrador_reporte: { datos: decisionIA, historial: checkData.borrador_reporte.historial, last_msg_id: message.id, alerta_enviada: nuevaMemoria.alerta_enviada } }).eq('id', trabajador.id)
+        await supabase.from('trabajadores').update({ estado_conversacion: 'pospuesto', borrador_reporte: { datos: decisionIA, historial: currentBorrador.historial, last_msg_id: message.id, alerta_enviada: nuevaMemoria.alerta_enviada } }).eq('id', trabajador.id)
         await enviarWhatsApp(from, decisionIA.respuesta_whatsapp)
         return NextResponse.json({ status: 'postponed' })
       }
@@ -162,7 +163,7 @@ export async function POST(req: Request) {
 
       // CONTINUAR CONVERSACIÓN
       const respuestaItem: MensajeHistorial = { role: 'model', text: decisionIA.respuesta_whatsapp }
-      const historialFinal = [...checkData.borrador_reporte.historial, respuestaItem].slice(-15)
+      const historialFinal = [...(currentBorrador.historial || []), respuestaItem].slice(-15)
       
       await supabase.from('trabajadores').update({
         estado_conversacion: decisionIA.accion === 'pedir_confirmacion' ? 'esperando_confirmacion' : 'conversando', 
@@ -270,7 +271,7 @@ RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
   for (const modelo of modelos) {
     try {
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 8500) // Le damos un segundo más al LLM por si acaso
+      const timeoutId = setTimeout(() => controller.abort(), 8500) 
 
       const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
