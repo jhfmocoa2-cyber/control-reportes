@@ -47,21 +47,19 @@ export async function POST(req: Request) {
     const estadoActual = trabajador.estado_conversacion || 'inactivo'
     const rawMemoria = (trabajador.borrador_reporte as any) || {}
     
-    // EVITAR DUPLICADOS
     if (rawMemoria.last_msg_id === message.id) return NextResponse.json({ status: 'ignored_duplicate' })
 
-    // HORA BOGOTÁ Y DOMINGOS
     const horaBogota = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Bogota" }))
     const esDomingo = horaBogota.getDay() === 0
     const horaDecimal = horaBogota.getHours() + (horaBogota.getMinutes() / 60)
     const esHoraReporte = horaDecimal >= 16.5
     const horaFormateada = horaBogota.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
 
-    // 🚨 DETECCIÓN DE PRIMER CONTACTO EN ESTE PROYECTO 🚨
+    // DETECCIÓN DE PRIMER CONTACTO
     const { data: reportesAnt } = await supabase.from('reportes_operativos')
       .select('*')
       .eq('trabajador_id', trabajador.id)
-      .eq('proyecto_id', trabajador.proyecto_id) // Filtramos por la obra actual
+      .eq('proyecto_id', trabajador.proyecto_id)
       .eq('confirmado', true)
       .order('created_at', { ascending: false }).limit(1)
       
@@ -71,14 +69,12 @@ export async function POST(req: Request) {
     const textoCrudo = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || ''
     const textoLimpio = normalizarTexto(textoCrudo)
 
-    // REINICIO FORZADO
     if (/\b(reiniciar|empezar de nuevo|borrar todo|corregir)\b/i.test(textoLimpio)) {
       await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id, alerta_enviada: false } }).eq('id', trabajador.id)
       await enviarWhatsApp(from, `🔄 Listo ${nombreOperador}, bitácora en blanco. Arranquemos, ¿cómo nos fue hoy?`)
       return NextResponse.json({ status: 'reset_flow' })
     }
 
-    // DISPARADOR INICIAL
     const esBotonMeta = message.type === 'button' || message.type === 'interactive' || textoLimpio.includes('confirmar recepcion')
     const esSaludo = textoLimpio.length <= 15 && /\b(hola|ola|buenas|que mas|saludos)\b/i.test(textoLimpio)
     
@@ -102,12 +98,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'welcome_sent' })
     }
 
-    // IGNORAR BUCLES
-    if (estadoActual === 'inactivo' && textoLimpio.length < 25 && /\b(ok|listo|gracias|amén|amen|chao|feliz noche|buenas noches|buena noche|👍|🙏)\b/i.test(textoLimpio)) {
+    // EL ESCUDO DE CORTESÍA BLINDADO
+    if (estadoActual === 'inactivo' && esMensajeCortesia(textoLimpio)) {
       return NextResponse.json({ status: 'ignored_courtesy_loop' })
     }
 
-    // MULTIMEDIA
     if (message.type === 'audio' || message.type === 'voice') {
       await enviarWhatsApp(from, `¡Qué pena ${nombreOperador}! Por ahora no escucho audios. Escríbemelo, porfa.`)
       return NextResponse.json({ status: 'audio_rejected' })
@@ -117,7 +112,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'image_received' })
     }
 
-    // AMORTIGUADOR DE 3 SEGUNDOS
     if (message.type === 'text') {
       const historial = Array.isArray(rawMemoria.historial) ? rawMemoria.historial : []
       const nuevoItem: MensajeHistorial = { role: 'user', text: textoCrudo }
@@ -140,8 +134,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'superseded_by_newer_message' })
       }
 
-      // LLAMADA A LA IA
-      const decisionIA = await consultarGroq(textoCrudo, nombreOperador, frenteNombre, tipoProyecto, currentBorrador.datos || {}, currentBorrador.historial || [], esDomingo, reporteAyer, horaFormateada, esHoraReporte)
+      const decisionIA = await consultarGroq(textoCrudo, nombreOperador, frenteNombre, tipoProyecto, currentBorrador.datos || {}, currentBorrador.historial || [], esDomingo, reporteAyer, horaFormateada, esPrimerContacto)
 
       if (decisionIA.alerta_jefatura && !currentBorrador.alerta_enviada) {
         await enviarWhatsApp(NUMERO_JEFATURA, `🚨 *ALERTA DE OBRA* 🚨\nEl perforador *${nombreOperador}* en *${frenteNombre}* reporta novedad crítica/dominical.\n\n*Mensaje:* "${textoCrudo}"`)
@@ -154,9 +147,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'postponed' })
       }
 
-      // GUARDAR REPORTE (AQUÍ USAMOS LOS DATOS CONGELADOS)
       if (decisionIA.accion === 'guardar_reporte') {
-        // La IA debe devolver la data completa. Si devolvió algo vacío, usamos el currentBorrador como salvavidas.
         const dataFinal = (decisionIA.avance_hoy?.metros_pq || decisionIA.avance_hoy?.metros_ensanche || decisionIA.avance_hoy?.metros_camisa || decisionIA.avance_hoy?.metros_nq_spt || decisionIA.avance_hoy?.tipo === 'standby') 
                           ? decisionIA 
                           : currentBorrador.datos;
@@ -167,7 +158,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'saved_by_ai' })
       }
 
-      // CONTINUAR CHARLA
       const respuestaItem: MensajeHistorial = { role: 'model', text: decisionIA.respuesta_whatsapp }
       const historialFinal = [...(currentBorrador.historial || []), respuestaItem].slice(-15)
       
@@ -217,7 +207,7 @@ async function guardarOActualizarReporte(trabajador: any, decisionIA: any, texto
   }
 }
 
-async function consultarGroq(mensaje: string, operador: string, frente: string, tipoProyecto: string, datosPrevios: any, historial: MensajeHistorial[], esDomingo: boolean, reporteAyer: any, horaFormateada: string, esHoraReporte: boolean) {
+async function consultarGroq(mensaje: string, operador: string, frente: string, tipoProyecto: string, datosPrevios: any, historial: MensajeHistorial[], esDomingo: boolean, reporteAyer: any, horaFormateada: string, esPrimerContacto: boolean) {
   const groqKey = (process.env.GROQ_API_KEY || '').trim()
   if (!groqKey) return { accion: 'conversar', respuesta_whatsapp: `⏳ Error de conexión.`, alerta_jefatura: false, posponer_reporte: false }
 
@@ -229,13 +219,15 @@ CONTEXTO DEL SISTEMA:
 - Proyecto: ${frente} (Tipo: ${tipoProyecto})
 - Reloj en Obra: ${horaFormateada}
 - HOY ES DOMINGO: ${esDomingo ? 'SÍ' : 'NO'}
+- ES PRIMER CONTACTO EN ESTA OBRA: ${esPrimerContacto ? 'SÍ' : 'NO'}
 
 REGLAS DE INGENIERÍA:
-1. EL BUG DEL "SÍ": Si el operador dice "sí", "listo" o "ok" para confirmar el reporte que tú le resumiste, TIENES PROHIBIDO BORRAR LOS DATOS PREVIOS. Tu JSON debe devolver los mismos números exactos que tenías antes en "datos_previos", con accion="guardar_reporte".
-2. FOCO EN ENCAMISADO (PILOTES): Lo que más nos importa registrar de los pilotes es el encamisado. Si el operador dice "avancé 5 metros", NO asumas que es camisa, pero tampoco lo obligues a darte prehueco y ensanche. Simplemente indaga: "¿Esos 5 metros fueron encamisando o haciendo prehueco/ensanche?". Guárdalo donde él te diga y no le preguntes por el resto de fases.
-3. ESTUDIO DE SUELOS: Solo nos importa el avance total. Si quiere decir si fue NQ o SPT, lo anotas en observaciones. No lo exijas.
-4. LA SALIDA DE EMERGENCIA: Si el operador te dice "no me sé el número del pilote", NO lo bloquees. Pon en numero_punto: "Pilote Pendiente" y avanza.
-5. NOVEDADES CRÍTICAS: Si reportan varada o lluvia, activa "alerta_jefatura": true. Asume metros=0, tipo="standby" si dice que pararon por hoy.
+1. PRIMER CONTACTO (INVENTARIO BASE): Si "ES PRIMER CONTACTO" es SÍ, tu misión es levantar la línea base del proyecto. Debes indagar: 1) ¿Qué pilotes/sondeos ya están 100% terminados a la fecha? 2) ¿En qué punto están actualmente y cuántos metros acumulados llevan? TIENES PROHIBIDO pedir confirmación o cerrar la charla hasta tener este panorama completo. 
+2. EL BUG DEL "SÍ": Si el operador dice "sí", "listo" o "ok" para confirmar el reporte que tú le resumiste, TIENES PROHIBIDO BORRAR LOS DATOS PREVIOS. Tu JSON debe devolver los mismos números exactos que tenías antes en "datos_previos", con accion="guardar_reporte".
+3. PROHIBIDO GUARDAR PREMATURAMENTE: Nunca uses accion="guardar_reporte" directamente. Siempre debes hacer un resumen general y usar accion="pedir_confirmacion". Solo cuando el operador diga "Sí" o "ok" a tu resumen, puedes usar "guardar_reporte".
+4. FOCO EN ENCAMISADO (PILOTES): Lo que más nos importa registrar es el encamisado. Si dicen "avancé 5 metros", NO asumas que es camisa, indaga: "¿Esos 5m fueron encamisando o haciendo prehueco/ensanche?". Guárdalo donde él te diga y no le preguntes obligatoriamente por las otras fases. Asume que son cero.
+5. ESTUDIO DE SUELOS: Solo nos importa el avance total.
+6. NOVEDADES CRÍTICAS: Si reportan varada o lluvia, activa "alerta_jefatura": true.
 
 DATOS PREVIOS (MANTENLOS INTACTOS SI EL USUARIO ESTÁ CONFIRMANDO):
 ${JSON.stringify(datosPrevios)}
@@ -309,6 +301,11 @@ RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
 }
 
 function normalizarTexto(t: string): string { return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim() }
+
+function esMensajeCortesia(textoLimpio: string): boolean {
+  if (textoLimpio.length > 25) return false;
+  return /\b(ok|listo|gracias|amén|amen|chao|feliz noche|buenas noches|buena noche|👍|🙏|con gusto|de nada|vale|dale|bueno)\b/i.test(textoLimpio);
+}
 
 async function enviarWhatsApp(to: string, text: string) {
   const token = (process.env.WHATSAPP_ACCESS_TOKEN || '').replace(/['"]/g, '').trim()
