@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
 
+// 🚨 LIMPIADOR Y BLOQUEADOR DE CACHÉ DE VERCEL 🚨
+export const dynamic = 'force-dynamic'
+export const fetchCache = 'force-no-store'
+
 const META_VERIFY_TOKEN = 'clave_secreta_reportes_2026'
 const META_MESSAGES_URL = 'https://graph.facebook.com/v19.0/1370874296109664/messages'
 const NUMERO_JEFATURA = '573103953485'
@@ -80,7 +84,7 @@ export async function POST(req: Request) {
     const textoCrudo = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || ''
     const textoLimpio = normalizarTexto(textoCrudo)
     
-    // 1. COMANDO REINICIAR
+    // 1. COMANDO REINICIAR FORZADO
     if (/\b(reiniciar|empezar de nuevo|borrar todo|corregir)\b/i.test(textoLimpio)) {
       await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id, alerta_enviada: false } }).eq('id', trabajador.id)
       await enviarWhatsApp(from, `🔄 Listo ${nombreOperador}, bitácora en blanco. Arranquemos, ¿cómo nos fue hoy?`)
@@ -88,14 +92,15 @@ export async function POST(req: Request) {
     }
 
     // 2. MATAR BUCLES DE DESPEDIDA
-    // Si la conversación está inactiva y envían algo como "ok", "amén", "gracias", lo ignoramos completamente (no respondemos nada) para no reiniciar el flujo.
     if (estadoActual === 'inactivo' && textoLimpio.length < 25 && /\b(ok|listo|gracias|amén|amen|chao|feliz noche|buenas noches|buena noche|👍|🙏)\b/i.test(textoLimpio)) {
       return NextResponse.json({ status: 'ignored_courtesy_loop' })
     }
 
-    // 3. DESPERTAR O GATILLO (Mensaje automático de Meta a las 5pm o saludo inicial)
-    const esArranque = message.type === 'button' || message.type === 'interactive' || /\b(hola|buenas|confirmar recepcion|recepcion|reporte)\b/i.test(textoLimpio)
-    if (esArranque && (estadoActual === 'inactivo' || estadoActual === 'esperando_reporte')) {
+    // 3. DISPARADORES DE NUEVA CONVERSACIÓN (AQUÍ ESTÁ LA MAGIA REPARADA)
+    const esBotonMeta = message.type === 'button' || message.type === 'interactive' || textoLimpio.includes('confirmar recepcion');
+    const esSaludo = /\b(hola|ola|holi|oli|buenas|buenos dias|buenas tardes|que mas|saludos|reporte)\b/i.test(textoLimpio);
+    
+    if (esBotonMeta || (esSaludo && (estadoActual === 'inactivo' || estadoActual === 'esperando_reporte'))) {
       await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id, alerta_enviada: false } }).eq('id', trabajador.id)
       
       let msjArranque = `👋 ¡Hola ${nombreOperador}! Espero que todo haya salido excelente en *${frenteNombre}* hoy.\n\n`
@@ -129,20 +134,17 @@ export async function POST(req: Request) {
 
       const decisionIA = await consultarGroq(textoCrudo, nombreOperador, frenteNombre, tipoProyecto, memoria.datos || {}, historialActualizado, esDomingo, reporteAyer)
 
-      // ALERTA DE JEFATURA EN TIEMPO REAL (Solo se envía una vez por incidente)
       if (decisionIA.alerta_jefatura && !memoria.alerta_enviada) {
         await enviarWhatsApp(NUMERO_JEFATURA, `🚨 *ALERTA DE OBRA* 🚨\nEl perforador *${nombreOperador}* en *${frenteNombre}* acaba de reportar una novedad crítica o un trabajo dominical no autorizado.\n\n*Mensaje del operador:* "${textoCrudo}"`)
-        memoria.alerta_enviada = true // Bloqueamos para que no envíe spam en la misma conversación
+        memoria.alerta_enviada = true 
       }
 
-      // ESTADO POSPUESTO ("Todavía no termino")
       if (decisionIA.posponer_reporte) {
         await supabase.from('trabajadores').update({ estado_conversacion: 'pospuesto', borrador_reporte: { datos: decisionIA.datos_actualizados, historial: historialActualizado, last_msg_id: message.id, alerta_enviada: memoria.alerta_enviada } }).eq('id', trabajador.id)
         await enviarWhatsApp(from, decisionIA.respuesta_whatsapp)
         return NextResponse.json({ status: 'postponed' })
       }
 
-      // GUARDAR REPORTE DEFINITIVO
       if (decisionIA.accion === 'guardar_reporte') {
         const d = { ...(memoria.datos || {}), ...decisionIA.datos_actualizados }
         await guardarOActualizarReporte(trabajador, d, textoCrudo)
