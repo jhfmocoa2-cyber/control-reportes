@@ -3,6 +3,7 @@ import { supabase } from '@/lib/supabase'
 
 const META_VERIFY_TOKEN = 'clave_secreta_reportes_2026'
 const META_MESSAGES_URL = 'https://graph.facebook.com/v19.0/1370874296109664/messages'
+const NUMERO_JEFATURA = '573103953485' // Tu número para las pruebas de Alerta
 
 type TipoOperacion = 'estudio_suelo' | 'pilote' | 'standby' | 'logistica'
 interface MensajeHistorial { role: string; text: string }
@@ -53,6 +54,16 @@ export async function POST(req: Request) {
     
     if (rawMemoria.last_msg_id === message.id) return NextResponse.json({ status: 'ignored_duplicate' })
 
+    // CÁLCULO DE HORA BOGOTÁ Y DOMINGOS
+    const horaBogota = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Bogota" }))
+    const esDomingo = horaBogota.getDay() === 0
+
+    // MEMORIA DEL AYER (Buscamos el último reporte confirmado)
+    const { data: reportesAnt } = await supabase.from('reportes_operativos')
+      .select('*').eq('trabajador_id', trabajador.id).eq('confirmado', true)
+      .order('created_at', { ascending: false }).limit(1)
+    const reporteAyer = reportesAnt?.[0] || null
+
     const memoria: MemoriaConversacion = {
       datos: rawMemoria.datos || (rawMemoria.tipo ? rawMemoria : {}),
       historial: Array.isArray(rawMemoria.historial) ? rawMemoria.historial : []
@@ -67,36 +78,48 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'reset_flow' })
     }
 
-    // 🚨 REGLA ESTRICTA DE DESPEDIDA: Evita el bucle del "buenas noches"
     if (estadoActual === 'inactivo' && esDespedidaOInterjeccion(textoLimpio)) {
       await enviarWhatsApp(from, `🙏 ¡Que descanses, ${nombreOperador}! Quedo QAP para mañana.`)
       return NextResponse.json({ status: 'closed_courtesy' })
     }
 
-    const esSaludo = /\b(hola|ola|holi|oli|buenas|buenos dias|buenas tardes|que mas|saludos|confirmar recepcion|recepcion)\b/i.test(textoLimpio)
+    const esSaludo = /\b(hola|ola|holi|oli|buenas|buenos dias|buenas tardes|que mas|saludos|confirmar recepcion|recepcion|reporte)\b/i.test(textoLimpio)
     
     if ((message.type === 'button' || message.type === 'interactive' || esSaludo) && (estadoActual === 'inactivo' || estadoActual === 'esperando_reporte')) {
       await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id } }).eq('id', trabajador.id)
-      await enviarWhatsApp(from, `👋 ¡Qué más ${nombreOperador}! Te saluda el Asistente de Operaciones de *JHF Perforaciones S.A.S.*\n\n¿Cómo nos trató hoy el proyecto *${frenteNombre}*? 💪\n\nCuéntame en qué número de pilote o sondeo andamos y cómo estuvo el avance de hoy.`)
+      await enviarWhatsApp(from, `👋 ¡Qué más ${nombreOperador}! Espero que todo haya salido excelente en *${frenteNombre}* hoy.\n\nCuéntame, ¿qué logramos avanzar hoy o tuvimos alguna novedad?`)
       return NextResponse.json({ status: 'welcome_sent' })
     }
 
     if (message.type === 'audio' || message.type === 'voice') {
-      await enviarWhatsApp(from, `👋 ¡Qué pena ${nombreOperador}! Por ahora soy sordo para los audios. Escríbeme el reporte en un mensajito corto, hágale.`)
+      await enviarWhatsApp(from, `👋 ¡Qué pena ${nombreOperador}! Por ahora soy sordo para los audios. Escríbeme el reporte en un mensajito, hágale.`)
       return NextResponse.json({ status: 'audio_rejected' })
     }
     if (message.type === 'image') {
-      await enviarWhatsApp(from, `📷 ¡Buena foto ${nombreOperador}! Ya quedó guardada en el consolidado.`)
+      await enviarWhatsApp(from, `📷 ¡Buena foto ${nombreOperador}! Ya quedó guardada en la bitácora.`)
       return NextResponse.json({ status: 'image_received' })
     }
 
     if (message.type === 'text') {
       await supabase.from('trabajadores').update({ borrador_reporte: { ...rawMemoria, last_msg_id: message.id } }).eq('id', trabajador.id)
       const nuevoItem: MensajeHistorial = { role: 'user', text: textoCrudo }
-      const historialActualizado: MensajeHistorial[] = [...(memoria.historial || []), nuevoItem].slice(-8)
+      const historialActualizado: MensajeHistorial[] = [...(memoria.historial || []), nuevoItem].slice(-10)
 
-      const decisionIA = await consultarGroq(textoCrudo, nombreOperador, frenteNombre, memoria.datos || {}, historialActualizado)
+      const decisionIA = await consultarGroq(textoCrudo, nombreOperador, frenteNombre, memoria.datos || {}, historialActualizado, esDomingo, reporteAyer)
 
+      // ALERTA DE JEFATURA EN TIEMPO REAL
+      if (decisionIA.alerta_jefatura) {
+        await enviarWhatsApp(NUMERO_JEFATURA, `🚨 *ALERTA DE OBRA* 🚨\nEl perforador *${nombreOperador}* en *${frenteNombre}* acaba de reportar una novedad crítica o un trabajo dominical no autorizado.\n\n*Mensaje del operador:* "${textoCrudo}"`)
+      }
+
+      // ESTADO POSPUESTO ("Todavía no termino")
+      if (decisionIA.posponer_reporte) {
+        await supabase.from('trabajadores').update({ estado_conversacion: 'pospuesto', borrador_reporte: { datos: decisionIA.datos_actualizados, historial: historialActualizado, last_msg_id: message.id } }).eq('id', trabajador.id)
+        await enviarWhatsApp(from, decisionIA.respuesta_whatsapp)
+        return NextResponse.json({ status: 'postponed' })
+      }
+
+      // GUARDAR REPORTE DEFINITIVO
       if (decisionIA.accion === 'guardar_reporte') {
         const d = { ...(memoria.datos || {}), ...decisionIA.datos_actualizados }
         await guardarOActualizarReporte(trabajador, d, textoCrudo)
@@ -108,7 +131,7 @@ export async function POST(req: Request) {
       const respuestaItem: MensajeHistorial = { role: 'model', text: decisionIA.respuesta_whatsapp }
       historialActualizado.push(respuestaItem)
       const nuevaMemoria: MemoriaConversacion = {
-        datos: { ...(memoria.datos || {}), ...decisionIA.datos_actualizados }, historial: historialActualizado.slice(-8), last_msg_id: message.id
+        datos: { ...(memoria.datos || {}), ...decisionIA.datos_actualizados }, historial: historialActualizado.slice(-10), last_msg_id: message.id
       }
       
       await supabase.from('trabajadores').update({
@@ -142,30 +165,36 @@ async function guardarOActualizarReporte(trabajador: any, d: DatosReporte, texto
   }
 }
 
-async function consultarGroq(mensaje: string, operador: string, frente: string, datosPrevios: DatosReporte, historial: MensajeHistorial[]) {
+async function consultarGroq(mensaje: string, operador: string, frente: string, datosPrevios: DatosReporte, historial: MensajeHistorial[], esDomingo: boolean, reporteAyer: any) {
   const groqKey = (process.env.GROQ_API_KEY || '').trim()
-  if (!groqKey) return { accion: 'conversar', respuesta_whatsapp: `🛠️ ERROR VERCEL: Llave GROQ_API_KEY no encontrada.`, datos_actualizados: datosPrevios }
+  if (!groqKey) return { accion: 'conversar', respuesta_whatsapp: `🛠️ ERROR: Llave GROQ_API_KEY no encontrada.`, datos_actualizados: datosPrevios, alerta_jefatura: false, posponer_reporte: false }
 
   const prompt = `
-Eres el Asistente Técnico de Operaciones de JHF Perforaciones S.A.S. en Colombia. Hablas con "${operador}" en el proyecto "${frente}".
-TONO Y JERGA: Eres un colega de obra empático, con "malicia indígena". Usa expresiones naturales como "hágale", "quedo QAP", "coronar", "metritos", "standby". NUNCA uses "Don" ni "Doña". Llámalo por su nombre.
+Eres el Asistente de Bitácoras de JHF Perforaciones S.A.S. Hablas con el operador "${operador}".
+Tono: Colega de obra, directo, usa "hágale", "quedo QAP". NUNCA uses "Don". 
 
-TU PROPÓSITO Y LÓGICA TÉCNICA (SÍGUELO ESTRICTAMENTE):
-1. INDAGACIÓN EXHAUSTIVA (¡CRÍTICO PARA PILOTES!): Si el operador te dice algo genérico como "avancé 4 metros en el pilote 22", NO TIENES LA INFORMACIÓN COMPLETA. TIENES PROHIBIDO pedir confirmación o guardar el reporte. Debes interrogarlo de una forma natural:
-   - "¿Esos 4 metros fueron de prehueco, de ensanche o ya es metiendo camisa?"
-   - "¿Y de cuántos metros de profundidad total va a quedar ese pilote?"
-2. COMPRENSIÓN DE DATOS: Sabes que un pilote tiene Prehueco (PQ/5"), Ensanche (8") y Camisa. Si te dan un acumulado histórico ("el pilote va en 10m y hoy le hice 2m"), tú extraes y registras SOLO los 2m de hoy en la variable que corresponda, y en "observaciones" escribes la historia completa.
-3. NOVEDADES TEMPRANAS Y STANDBY: "SISO" (Seguridad en el Trabajo), lluvia o equipo dañado equivalen a 0 metros (Standby). Si reportan esto temprano, consuélalos ("¡Qué mala pata!") y pregúntales: "¿Con esto cerramos el reporte de hoy o quedo QAP por si solucionan y le dan más metros?".
-4. DISTRACCIONES: Si preguntan por viáticos, pagos o vacaciones, diles cortésmente que tú solo cuadras la bitácora técnica de obra y que eso toca con la oficina.
-5. CONSOLIDADO FINAL: Una vez tengas ABSOLUTAMENTE TODO claro (Número de pilote, qué fase hicieron hoy, y de cuántos metros es la profundidad total), envíale el resumen estructurado y pide su confirmación. Solo cuando responda que SÍ, usa accion="guardar_reporte".
+CONTEXTO DEL SISTEMA:
+- HOY ES DOMINGO O FESTIVO: ${esDomingo ? 'SÍ' : 'NO'}
+- REPORTE DE AYER: ${reporteAyer ? JSON.stringify(reporteAyer) : 'No hay datos de ayer.'}
 
-DATOS PREVIOS: ${JSON.stringify(datosPrevios)}
-HISTORIAL DE CONVERSACIÓN: ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
+REGLAS ESTRICTAS DE OPERACIÓN:
+1. TRABAJO DOMINICAL: Si HOY ES DOMINGO es SÍ, vuélvete un auditor estricto. Dile: "Un momento ${operador}, no tenías aprobado trabajo dominical. ¿Quién autorizó esto? Para poder registrar esta novedad, necesito que me envíes ya mismo dos fotografías (ingreso y salida) donde se vean los rostros, fecha, hora local y ubicación." Activa la variable "alerta_jefatura": true.
+2. TODAVÍA NO TERMINO (Pospuesto): Si el operador dice "aún no acabo", "estoy dándole", "espéreme", dile: "¡Tranquilo, hágale! Escríbame por aquí cuando termine y cerramos el reporte." Activa "posponer_reporte": true.
+3. NOVEDADES CRÍTICAS (Alerta): Si reportan daño de máquina (varada), lluvia fuerte, o paro de SISO/SST, dales ánimo, activa "alerta_jefatura": true, y pregúntales: "¿Con esto cerramos el reporte de hoy o quedo QAP por si solucionan?". Si es definitivo, metros=0 y tipo="standby".
+4. EL ARREPENTIMIENTO: Si el operador te dice que quiere corregir o cambiar un reporte que ya te había dado, dile "Claro, no hay problema, actualizamos. ¿Cómo quedan los datos reales?".
+5. MENSAJES EN PEDAZOS: Los operadores escriben corto. Lee el historial para entender la idea completa antes de pedir confirmación.
+6. MATEMÁTICA DE PILOTES: Si es pilote necesitas: # de pilote, metros HOY de Prehueco (PQ), Ensanche (8") y Camisa, y profundidad total. Si te dan el acumulado histórico, extrae SOLO lo de hoy. Apóyate en el REPORTE DE AYER para guiar la charla.
+7. CIERRE: Solo cuando tengas TODOS los datos obligatorios, haz un resumen consolidado en "observaciones", pide confirmación y pon accion="pedir_confirmacion". Si responden "sí", "ok", "listo", pon accion="guardar_reporte".
+
+DATOS ACTUALES RECOLECTADOS HOY: ${JSON.stringify(datosPrevios)}
+HISTORIAL RECIENTE: ${historial.map(h => `${h.role}:${h.text}`).join('\n')}
 
 RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
 {
   "accion": "conversar" | "pedir_confirmacion" | "guardar_reporte",
   "respuesta_whatsapp": "Tu respuesta aquí...",
+  "alerta_jefatura": boolean,
+  "posponer_reporte": boolean,
   "datos_actualizados": {
     "tipo": "estudio_suelo" | "pilote" | "standby" | "logistica",
     "sondeo": string | null,
@@ -201,7 +230,13 @@ RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
         raw = raw.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim()
         if (raw) {
           const parsed = JSON.parse(raw)
-          return { accion: parsed.accion || 'conversar', respuesta_whatsapp: parsed.respuesta_whatsapp || '', datos_actualizados: (parsed.datos_actualizados || {}) as DatosReporte }
+          return { 
+            accion: parsed.accion || 'conversar', 
+            respuesta_whatsapp: parsed.respuesta_whatsapp || '', 
+            alerta_jefatura: !!parsed.alerta_jefatura,
+            posponer_reporte: !!parsed.posponer_reporte,
+            datos_actualizados: (parsed.datos_actualizados || {}) as DatosReporte 
+          }
         }
       } else {
         const data = await res.json()
@@ -212,12 +247,11 @@ RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
     }
   }
 
-  return { accion: 'conversar', respuesta_whatsapp: `⏳ ${operador}, dame un segundito que la central está procesando los datos. Vuelve a enviarme tu último mensaje porfa.`, datos_actualizados: datosPrevios }
+  return { accion: 'conversar', respuesta_whatsapp: `⏳ La central de datos está sincronizando. Vuelve a enviarme tu último mensaje, ${operador}.`, alerta_jefatura: false, posponer_reporte: false, datos_actualizados: datosPrevios }
 }
 
 function normalizarTexto(t: string): string { return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim() }
 
-// REGEX ULTRA ESTRICTO: Solo reconoce despedida si el mensaje es corto (evita falsos positivos si mandan un reporte largo y al final dicen gracias)
 function esDespedidaOInterjeccion(limpio: string): boolean { 
   if (limpio.length > 35) return false;
   return /(gracias|feliz noche|buenas noches|buena noche|chao|amen|nos vemos|👍|🙏|hasta luego|descansa|listo gracias)/i.test(limpio) 
