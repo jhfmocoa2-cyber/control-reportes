@@ -55,6 +55,10 @@ export default function Home() {
   const [proyectoId, setProyectoId] = useState('')
   const [jornada, setJornada] = useState('L-S')
   const [cargo, setCargo] = useState('Perforador')
+  const [mostrarDirectorio, setMostrarDirectorio] = useState(false)
+
+  // Directorio Único (sin duplicados de teléfono)
+  const directorioUnico = Array.from(new Map(trabajadores.map(t => [t.telefono, t])).values())
 
   // Formulario nuevo proyecto
   const [nombreProyecto, setNombreProyecto] = useState('')
@@ -116,27 +120,24 @@ export default function Home() {
     const confirmar = confirm(
       `¿Deseas finalizar y cerrar la obra "${nombreObra}"?\n\n` +
       `⚠️ Acción:\n` +
-      `• Se darán de baja y eliminarán los ${totalTrabs} operarios asignados a este frente.\n` +
+      `• Se darán de baja los ${totalTrabs} operarios asignados a este frente.\n` +
       `• El bot no volverá a escribirles ni a incluirlos en los consolidados.\n` +
       `• El historial en la Bitácora se mantiene intacto.`
     )
 
     if (!confirmar) return
 
-    // 1. Eliminar trabajadores asignados a esa obra
     const { error: errTrabs } = await supabase.from('trabajadores').delete().eq('proyecto_id', id)
     if (errTrabs) {
-      console.warn('Fallback: Desactivando trabajadores...', errTrabs)
       await supabase.from('trabajadores').update({ activo: false }).eq('proyecto_id', id)
     }
 
-    // 2. Eliminar la obra
     const { error: errProy } = await supabase.from('proyectos').delete().eq('id', id)
     if (errProy) {
       console.warn('Error al borrar obra:', errProy)
     }
 
-    alert(`🏁 Obra "${nombreObra}" finalizada con éxito. Operarios desvinculados del bot.`)
+    alert(`🏁 Obra "${nombreObra}" finalizada con éxito.`)
     cargarDatos()
   }
 
@@ -149,22 +150,36 @@ export default function Home() {
 
     const telLimpio = telefono.replace(/\D/g, '')
 
-    const { error } = await supabase.from('trabajadores').insert({
-      nombre: nombre.trim(),
-      telefono: telLimpio,
-      proyecto_id: proyectoId,
-      cargo,
-      jornada,
-      activo: true,
-      estado_conversacion: 'inactivo'
-    })
+    // 1. Buscamos si el trabajador ya existe en el directorio
+    const { data: existente } = await supabase.from('trabajadores').select('id').eq('telefono', telLimpio).maybeSingle()
 
-    if (error) {
-      alert(`❌ Error al registrar trabajador: ${error.message}`)
-      return
+    if (existente) {
+      // 2. Si existe, lo REASIGNAMOS (Update)
+      const { error } = await supabase.from('trabajadores').update({
+        nombre: nombre.trim(),
+        proyecto_id: proyectoId,
+        cargo,
+        jornada,
+        activo: true,
+        estado_conversacion: 'inactivo'
+      }).eq('id', existente.id)
+      
+      if (error) { alert(`❌ Error al reasignar: ${error.message}`); return }
+    } else {
+      // 3. Si es nuevo, lo INSERTAMOS
+      const { error } = await supabase.from('trabajadores').insert({
+        nombre: nombre.trim(),
+        telefono: telLimpio,
+        proyecto_id: proyectoId,
+        cargo,
+        jornada,
+        activo: true,
+        estado_conversacion: 'inactivo'
+      })
+      if (error) { alert(`❌ Error al registrar: ${error.message}`); return }
     }
 
-    alert('✅ ¡Operador registrado exitosamente!')
+    alert('✅ ¡Operador registrado y asignado a la obra exitosamente!')
     setNombre('')
     setTelefono('')
     cargarDatos()
@@ -196,51 +211,11 @@ export default function Home() {
   }
 
   async function eliminarTrabajador(id: string, nombreTrabajador: string) {
-    if (!confirm(`¿Estás seguro de que deseas eliminar a ${nombreTrabajador}?`)) return
-
+    if (!confirm(`¿Estás seguro de que deseas eliminar permanentemente a ${nombreTrabajador} del directorio?`)) return
     const { error } = await supabase.from('trabajadores').delete().eq('id', id)
-    if (error) {
-      alert(`❌ No se pudo eliminar: ${error.message}`)
-      return
-    }
-
-    alert('🗑️ Operador eliminado.')
+    if (error) { alert(`❌ No se pudo eliminar: ${error.message}`); return }
+    alert('🗑️ Operador eliminado del directorio.')
     cargarDatos()
-  }
-
-  async function dispararRondaAhora() {
-    setEjecutando(true)
-    setMensajeEstado('Enviando mensajes de WhatsApp a los operarios activos...')
-    try {
-      const res = await fetch('/api/cron/solicitar-reportes')
-      const data = await res.json()
-      if (data.status === 'reminders_sent') {
-        setMensajeEstado('✅ Ronda enviada con éxito a todos los frentes activos.')
-      } else {
-        setMensajeEstado(`ℹ️ Estado: ${data.status}`)
-      }
-      cargarDatos()
-    } catch (err: any) {
-      setMensajeEstado(`❌ Error al enviar: ${err.message}`)
-    } finally {
-      setEjecutando(false)
-      setTimeout(() => setMensajeEstado(''), 6000)
-    }
-  }
-
-  async function dispararConsolidadoAhora() {
-    setEjecutando(true)
-    setMensajeEstado('Enviando consolidado a Don Jaime y Miguel...')
-    try {
-      const res = await fetch('/api/cron/enviar-consolidado')
-      const data = await res.json()
-      setMensajeEstado(`✅ Consolidado despachado a ${data.recipients || 2} administradores.`)
-    } catch (err: any) {
-      setMensajeEstado(`❌ Error al enviar: ${err.message}`)
-    } finally {
-      setEjecutando(false)
-      setTimeout(() => setMensajeEstado(''), 6000)
-    }
   }
 
   return (
@@ -279,98 +254,50 @@ export default function Home() {
       </header>
 
       <main className="flex-1 p-6 max-w-7xl w-full mx-auto">
-        {mensajeEstado && (
-          <div className="mb-4 p-3 bg-sky-950/80 border border-sky-600 text-sky-200 text-xs rounded-lg flex items-center justify-between">
-            <span>{mensajeEstado}</span>
-          </div>
-        )}
-
-        {/* MODAL EDITAR OPERADOR */}
+        
+        {/* MODAL EDITAR OPERADOR (Se mantiene igual) */}
         {editandoTrabajador && (
           <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 max-w-md w-full text-xs shadow-2xl">
               <h3 className="text-sm font-bold text-white mb-1">Editar Operador</h3>
-              <p className="text-slate-400 mb-4">Modifica el frente asignado, cargo o teléfono.</p>
-
               <form onSubmit={guardarEdicionTrabajador} className="space-y-3">
                 <div>
                   <label className="block text-slate-400 mb-1">Nombre</label>
-                  <input
-                    type="text"
-                    required
-                    value={editandoTrabajador.nombre}
-                    onChange={e => setEditandoTrabajador({ ...editandoTrabajador, nombre: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                  />
+                  <input type="text" required value={editandoTrabajador.nombre} onChange={e => setEditandoTrabajador({ ...editandoTrabajador, nombre: e.target.value })} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"/>
                 </div>
-
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-slate-400 mb-1">Teléfono</label>
-                    <input
-                      type="text"
-                      required
-                      value={editandoTrabajador.telefono}
-                      onChange={e => setEditandoTrabajador({ ...editandoTrabajador, telefono: e.target.value })}
-                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                    />
+                    <input type="text" required value={editandoTrabajador.telefono} onChange={e => setEditandoTrabajador({ ...editandoTrabajador, telefono: e.target.value })} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"/>
                   </div>
                   <div>
                     <label className="block text-slate-400 mb-1">Cargo</label>
-                    <select
-                      value={editandoTrabajador.cargo}
-                      onChange={e => setEditandoTrabajador({ ...editandoTrabajador, cargo: e.target.value })}
-                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                    >
+                    <select value={editandoTrabajador.cargo} onChange={e => setEditandoTrabajador({ ...editandoTrabajador, cargo: e.target.value })} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500">
                       <option value="Perforador">Perforador</option>
                       <option value="Auxiliar">Auxiliar</option>
                       <option value="Residente">Residente</option>
                     </select>
                   </div>
                 </div>
-
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-slate-400 mb-1">Cambiar Frente de Obra</label>
-                    <select
-                      required
-                      value={editandoTrabajador.proyecto_id}
-                      onChange={e => setEditandoTrabajador({ ...editandoTrabajador, proyecto_id: e.target.value })}
-                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                    >
-                      {proyectos.map(p => (
-                        <option key={p.id} value={p.id}>{p.nombre}</option>
-                      ))}
+                    <label className="block text-slate-400 mb-1">Frente de Obra</label>
+                    <select required value={editandoTrabajador.proyecto_id} onChange={e => setEditandoTrabajador({ ...editandoTrabajador, proyecto_id: e.target.value })} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500">
+                      {proyectos.map(p => (<option key={p.id} value={p.id}>{p.nombre}</option>))}
                     </select>
                   </div>
                   <div>
                     <label className="block text-slate-400 mb-1">Jornada</label>
-                    <select
-                      value={editandoTrabajador.jornada}
-                      onChange={e => setEditandoTrabajador({ ...editandoTrabajador, jornada: e.target.value })}
-                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                    >
+                    <select value={editandoTrabajador.jornada} onChange={e => setEditandoTrabajador({ ...editandoTrabajador, jornada: e.target.value })} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500">
                       <option value="L-S">Lunes a Sábado</option>
                       <option value="L-V">Lunes a Viernes</option>
                       <option value="Todos">Domingos incluidos</option>
                     </select>
                   </div>
                 </div>
-
                 <div className="flex gap-2 pt-2">
-                  <button
-                    type="submit"
-                    className="flex-1 bg-sky-600 hover:bg-sky-500 text-white font-medium py-2 rounded transition"
-                  >
-                    Guardar Cambios
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setEditandoTrabajador(null)}
-                    className="px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 py-2 rounded transition"
-                  >
-                    Cancelar
-                  </button>
+                  <button type="submit" className="flex-1 bg-sky-600 hover:bg-sky-500 text-white font-medium py-2 rounded transition">Guardar</button>
+                  <button type="button" onClick={() => setEditandoTrabajador(null)} className="px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 py-2 rounded transition">Cancelar</button>
                 </div>
               </form>
             </div>
@@ -383,107 +310,26 @@ export default function Home() {
             <div className="flex flex-wrap justify-between items-center gap-3">
               <div>
                 <h2 className="text-base font-semibold text-white">Control de Jornada Diaria</h2>
-                <p className="text-xs text-slate-400">Inicio de ronda: 6:30 PM | Consolidado: 8:00 PM</p>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  disabled={ejecutando}
-                  onClick={dispararRondaAhora}
-                  className="text-xs bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-medium px-3 py-1.5 rounded-md transition shadow"
-                >
-                  🚀 Disparar Ronda Ahora
-                </button>
-                <button
-                  disabled={ejecutando}
-                  onClick={dispararConsolidadoAhora}
-                  className="text-xs bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-medium px-3 py-1.5 rounded-md transition shadow"
-                >
-                  📲 Enviar Consolidado a Jefatura
-                </button>
-                <button
-                  onClick={cargarDatos}
-                  className="text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded-md transition"
-                >
-                  🔄 Actualizar
-                </button>
-              </div>
+              <button onClick={cargarDatos} className="text-xs bg-slate-800 px-3 py-1.5 rounded-md">🔄 Actualizar</button>
             </div>
-
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {trabajadores.map(t => {
                 const reporteHoy = haReportadoHoy(t.id)
-                const esperandoReporte = t.estado_conversacion === 'esperando_reporte_diario'
-
                 return (
-                  <div
-                    key={t.id}
-                    className={`border rounded-xl p-4 bg-slate-900/60 flex flex-col justify-between transition ${
-                      !t.activo
-                        ? 'border-slate-800 opacity-60'
-                        : reporteHoy
-                        ? 'border-emerald-500/40 bg-emerald-950/10'
-                        : 'border-amber-500/40 bg-amber-950/10'
-                    }`}
-                  >
+                  <div key={t.id} className={`border rounded-xl p-4 bg-slate-900/60 transition ${!t.activo ? 'border-slate-800 opacity-60' : reporteHoy ? 'border-emerald-500/40 bg-emerald-950/10' : 'border-amber-500/40 bg-amber-950/10'}`}>
                     <div>
                       <div className="flex justify-between items-start gap-2 mb-2">
                         <div>
                           <h3 className="font-semibold text-sm text-white">{t.nombre}</h3>
                           <p className="text-xs text-slate-400">+{t.telefono} • {t.cargo}</p>
                         </div>
-                        {!t.activo ? (
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
-                            Pausado hoy
-                          </span>
-                        ) : reporteHoy ? (
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800 flex items-center gap-1">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Reportado
-                          </span>
-                        ) : esperandoReporte ? (
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-sky-950 text-sky-400 border border-sky-800 flex items-center gap-1">
-                            <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-ping" /> Contactado
-                          </span>
-                        ) : (
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-950 text-amber-400 border border-amber-800 flex items-center gap-1">
-                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" /> Pendiente
-                          </span>
-                        )}
+                        {!t.activo ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">Pausado</span> : reporteHoy ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800">Reportado</span> : <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-950 text-amber-400 border border-amber-800">Pendiente</span>}
                       </div>
-
                       <div className="text-xs text-slate-300 mt-2 bg-slate-950/40 p-2.5 rounded border border-slate-800/80">
-                        <div className="text-[11px] text-slate-400">Frente de Trabajo:</div>
+                        <div className="text-[11px] text-slate-400">Frente:</div>
                         <div className="font-medium text-sky-400">{t.proyectos?.nombre || 'General'}</div>
-
-                        {reporteHoy && (
-                          <div className="mt-2 pt-2 border-t border-slate-800/60">
-                            <div className="text-[11px] text-emerald-400 font-medium">Avance asentado:</div>
-                            <div className="text-[11px] text-slate-300 line-clamp-2 mt-0.5">
-                              {reporteHoy.observaciones || 'Reporte consolidado'}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="mt-4 pt-3 border-t border-slate-800/80 flex justify-between items-center text-xs">
-                      <span className="text-[11px] text-slate-500">Jornada: {t.jornada}</span>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => setEditandoTrabajador(t)}
-                          className="text-[11px] text-sky-400 hover:text-sky-300 underline"
-                        >
-                          Editar
-                        </button>
-                        <button
-                          onClick={() => toggleActivoTrabajador(t.id, t.activo)}
-                          className={`text-[11px] px-2.5 py-1 rounded transition font-medium ${
-                            t.activo
-                              ? 'bg-red-950/40 hover:bg-red-900/50 text-red-300 border border-red-800/50'
-                              : 'bg-emerald-950/40 hover:bg-emerald-900/50 text-emerald-300 border border-emerald-800/50'
-                          }`}
-                        >
-                          {t.activo ? 'Pausar hoy' : 'Activar'}
-                        </button>
+                        {reporteHoy && <div className="mt-2 pt-2 border-t border-slate-800/60"><div className="text-[11px] text-emerald-400 font-medium">Avance:</div><div className="text-[11px] text-slate-300 truncate mt-0.5">{reporteHoy.observaciones}</div></div>}
                       </div>
                     </div>
                   </div>
@@ -497,66 +343,31 @@ export default function Home() {
         {tab === 'bitacora' && (
           <div className="space-y-4">
             <div className="flex justify-between items-center">
-              <div>
-                <h2 className="text-base font-semibold text-white">Bitácora Oficial de Perforación</h2>
-                <p className="text-xs text-slate-400">Historial consolidado recibido vía WhatsApp</p>
-              </div>
-              <button
-                onClick={cargarDatos}
-                className="text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded-md transition"
-              >
-                🔄 Refrescar
-              </button>
+              <h2 className="text-base font-semibold text-white">Bitácora Oficial</h2>
+              <button onClick={cargarDatos} className="text-xs bg-slate-800 px-3 py-1.5 rounded-md">🔄 Refrescar</button>
             </div>
-
-            {reportes.length === 0 ? (
-              <div className="p-12 text-center text-slate-500 border border-slate-800 rounded-xl bg-slate-900/20">
-                Aún no hay reportes confirmados registrados en el sistema.
-              </div>
-            ) : (
-              <div className="overflow-x-auto border border-slate-800 rounded-xl bg-slate-900/30">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-900/80 border-b border-slate-800 text-slate-400">
-                    <tr>
-                      <th className="p-3">Fecha/Hora</th>
-                      <th className="p-3">Operador</th>
-                      <th className="p-3">Obra</th>
-                      <th className="p-3">Tipo</th>
-                      <th className="p-3">Pilote / Sondeo</th>
-                      <th className="p-3">Avance</th>
-                      <th className="p-3">Observaciones / Detalle</th>
+            <div className="overflow-x-auto border border-slate-800 rounded-xl bg-slate-900/30">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-900/80 border-b border-slate-800 text-slate-400">
+                  <tr>
+                    <th className="p-3">Fecha/Hora</th><th className="p-3">Operador</th><th className="p-3">Obra</th><th className="p-3">Tipo</th><th className="p-3">Punto</th><th className="p-3">Avance</th><th className="p-3">Observaciones</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/50">
+                  {reportes.map(r => (
+                    <tr key={r.id} className="hover:bg-slate-800/20">
+                      <td className="p-3 text-slate-400">{new Date(r.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })}</td>
+                      <td className="p-3 font-medium text-white">{r.trabajador_nombre}</td>
+                      <td className="p-3 text-sky-400">{r.proyecto_nombre}</td>
+                      <td className="p-3"><span className="px-2 py-0.5 rounded text-[10px] uppercase font-semibold bg-slate-800 text-slate-300">{r.tipo_operacion}</span></td>
+                      <td className="p-3 font-bold text-amber-400">{r.pilote || r.sondeo || '—'}</td>
+                      <td className="p-3">{r.tipo_operacion === 'pilote' ? `PQ: ${r.avance_pq}m | Ens: ${r.ensanche}m | Camisa: ${r.encamisado}m` : r.tipo_operacion === 'estudio_suelo' ? `NQ: ${r.metros_nq}m | SPT: ${r.ensayos_spt}` : 'Logística'}</td>
+                      <td className="p-3 text-slate-300 truncate max-w-xs">{r.observaciones}</td>
                     </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/50">
-                    {reportes.map(r => (
-                      <tr key={r.id} className="hover:bg-slate-800/20 transition">
-                        <td className="p-3 whitespace-nowrap text-slate-400">
-                          {new Date(r.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })}
-                        </td>
-                        <td className="p-3 font-medium text-white">{r.trabajador_nombre}</td>
-                        <td className="p-3 text-sky-400">{r.proyecto_nombre}</td>
-                        <td className="p-3">
-                          <span className="px-2 py-0.5 rounded text-[10px] uppercase font-semibold bg-slate-800 text-slate-300">
-                            {r.tipo_operacion}
-                          </span>
-                        </td>
-                        <td className="p-3 font-bold text-amber-400">{r.pilote || r.sondeo || '—'}</td>
-                        <td className="p-3 whitespace-nowrap">
-                          {r.tipo_operacion === 'pilote'
-                            ? `PQ: ${r.avance_pq}m | Ens: ${r.ensanche}m`
-                            : r.tipo_operacion === 'estudio_suelo'
-                            ? `NQ: ${r.metros_nq}m | SPT: ${r.ensayos_spt}`
-                            : 'Logística'}
-                        </td>
-                        <td className="p-3 text-slate-300 max-w-xs truncate" title={r.observaciones}>
-                          {r.observaciones}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
@@ -564,83 +375,95 @@ export default function Home() {
         {tab === 'configuracion' && (
           <div className="space-y-6">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              
               {/* CREAR OBRA */}
               <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
                 <h3 className="text-sm font-semibold text-white mb-1">1. Crear Frente de Trabajo / Proyecto</h3>
                 <p className="text-xs text-slate-400 mb-4">Crea la obra para poder asignarla al personal.</p>
-
                 <form onSubmit={crearProyecto} className="space-y-3 text-xs">
                   <div>
                     <label className="block text-slate-400 mb-1">Nombre del Proyecto / Obra *</label>
-                    <input
-                      type="text"
-                      required
-                      value={nombreProyecto}
-                      onChange={e => setNombreProyecto(e.target.value)}
-                      placeholder="Ej: Pilotaje Autopista Norte / Ubaque"
-                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                    />
+                    <input type="text" required value={nombreProyecto} onChange={e => setNombreProyecto(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500" />
                   </div>
                   <div>
                     <label className="block text-slate-400 mb-1">Ubicación / Tramo</label>
-                    <input
-                      type="text"
-                      value={ubicacionProyecto}
-                      onChange={e => setUbicacionProyecto(e.target.value)}
-                      placeholder="Ej: Bogotá D.C. / K16+000"
-                      className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                    />
+                    <input type="text" value={ubicacionProyecto} onChange={e => setUbicacionProyecto(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500" />
                   </div>
-
-                  <button
-                    type="submit"
-                    className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2 rounded transition mt-2 shadow"
-                  >
-                    ➕ Guardar Proyecto / Obra
-                  </button>
+                  <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2 rounded transition mt-2 shadow">➕ Guardar Proyecto</button>
                 </form>
               </div>
 
-              {/* REGISTRAR OPERADOR */}
+              {/* REGISTRAR OPERADOR (CON AUTOCOMPLETADO) */}
               <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
-                <h3 className="text-sm font-semibold text-white mb-1">2. Registrar Operador en WhatsApp</h3>
-                <p className="text-xs text-slate-400 mb-4">Asocia al trabajador con su obra asignada.</p>
+                <h3 className="text-sm font-semibold text-white mb-1">2. Asignar Operador a Proyecto</h3>
+                <p className="text-xs text-slate-400 mb-4">Usa el directorio para cargar operarios antiguos o crea uno nuevo.</p>
 
                 <form onSubmit={crearTrabajador} className="space-y-3 text-xs">
-                  <div>
-                    <label className="block text-slate-400 mb-1">Nombre Completo *</label>
+                  <div className="relative">
+                    <div className="flex justify-between items-end mb-1">
+                      <label className="block text-slate-400">Nombre Completo *</label>
+                      {directorioUnico.length > 0 && (
+                        <button 
+                          type="button" 
+                          onClick={() => setMostrarDirectorio(!mostrarDirectorio)}
+                          className="text-sky-400 hover:text-sky-300 underline font-medium flex items-center gap-1"
+                        >
+                          📘 {mostrarDirectorio ? 'Cerrar Directorio' : 'Abrir Directorio'}
+                        </button>
+                      )}
+                    </div>
+                    
                     <input
                       type="text"
                       required
                       value={nombre}
                       onChange={e => setNombre(e.target.value)}
-                      placeholder="Ej: Wilson Mocoa"
+                      onFocus={() => setMostrarDirectorio(true)}
+                      placeholder="Ej: Sofia Florez"
                       className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
                     />
+
+                    {/* CAJA FLOTANTE DEL DIRECTORIO */}
+                    {mostrarDirectorio && (
+                      <div className="absolute z-10 w-full mt-1 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl max-h-48 overflow-y-auto">
+                        <div className="sticky top-0 bg-slate-800 px-3 py-2 text-[10px] uppercase font-bold text-slate-400 border-b border-slate-700">
+                          Personal Guardado en Directorio
+                        </div>
+                        {directorioUnico.filter(t => t.nombre.toLowerCase().includes(nombre.toLowerCase())).map(t => (
+                          <div
+                            key={t.telefono}
+                            onClick={() => {
+                              setNombre(t.nombre)
+                              setTelefono(t.telefono)
+                              setCargo(t.cargo || 'Perforador')
+                              setJornada(t.jornada || 'L-S')
+                              setMostrarDirectorio(false)
+                            }}
+                            className="px-3 py-2 border-b border-slate-800/50 hover:bg-slate-800 cursor-pointer transition flex justify-between items-center"
+                          >
+                            <div>
+                              <div className="font-bold text-white text-xs">{t.nombre}</div>
+                              <div className="text-slate-400 text-[10px]">+{t.telefono} • {t.cargo}</div>
+                            </div>
+                            <span className="text-[10px] bg-sky-900/50 text-sky-300 px-2 py-1 rounded">Autocompletar</span>
+                          </div>
+                        ))}
+                        {directorioUnico.filter(t => t.nombre.toLowerCase().includes(nombre.toLowerCase())).length === 0 && (
+                          <div className="p-3 text-slate-500 text-center text-xs">No se encontraron coincidencias.</div>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-slate-400 mb-1">Teléfono WhatsApp *</label>
-                      <input
-                        type="text"
-                        required
-                        value={telefono}
-                        onChange={e => setTelefono(e.target.value)}
-                        placeholder="Ej: 3209511767"
-                        className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                      />
+                      <input type="text" required value={telefono} onChange={e => setTelefono(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500" />
                     </div>
                     <div>
                       <label className="block text-slate-400 mb-1">Cargo</label>
-                      <select
-                        value={cargo}
-                        onChange={e => setCargo(e.target.value)}
-                        className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                      >
-                        <option value="Perforador">Perforador</option>
-                        <option value="Auxiliar">Auxiliar</option>
-                        <option value="Residente">Residente</option>
+                      <select value={cargo} onChange={e => setCargo(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500">
+                        <option value="Perforador">Perforador</option><option value="Auxiliar">Auxiliar</option><option value="Residente">Residente</option>
                       </select>
                     </div>
                   </div>
@@ -648,49 +471,29 @@ export default function Home() {
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-slate-400 mb-1">Frente Asignado *</label>
-                      <select
-                        required
-                        value={proyectoId}
-                        onChange={e => setProyectoId(e.target.value)}
-                        className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                      >
+                      <select required value={proyectoId} onChange={e => setProyectoId(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500">
                         <option value="">Selecciona obra...</option>
-                        {proyectos.map(p => (
-                          <option key={p.id} value={p.id}>{p.nombre}</option>
-                        ))}
+                        {proyectos.map(p => (<option key={p.id} value={p.id}>{p.nombre}</option>))}
                       </select>
                     </div>
                     <div>
                       <label className="block text-slate-400 mb-1">Jornada</label>
-                      <select
-                        value={jornada}
-                        onChange={e => setJornada(e.target.value)}
-                        className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
-                      >
-                        <option value="L-S">Lunes a Sábado</option>
-                        <option value="L-V">Lunes a Viernes</option>
-                        <option value="Todos">Domingos incluidos</option>
+                      <select value={jornada} onChange={e => setJornada(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500">
+                        <option value="L-S">Lunes a Sábado</option><option value="L-V">Lunes a Viernes</option><option value="Todos">Domingos incluidos</option>
                       </select>
                     </div>
                   </div>
 
-                  <button
-                    type="submit"
-                    className="w-full bg-sky-600 hover:bg-sky-500 text-white font-medium py-2 rounded transition mt-2 shadow"
-                  >
-                    ➕ Registrar Personal
+                  <button type="submit" className="w-full bg-sky-600 hover:bg-sky-500 text-white font-medium py-2 rounded transition mt-2 shadow">
+                    ➕ Guardar / Reasignar Personal
                   </button>
                 </form>
               </div>
             </div>
 
-            {/* GESTIÓN DE OBRAS Y FINALIZACIÓN */}
+            {/* FRENTES DE OBRA */}
             <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
-              <h3 className="text-sm font-semibold text-white mb-1">Frentes de Obra en Ejecución ({proyectos.length})</h3>
-              <p className="text-xs text-slate-400 mb-3">
-                Finalizar una obra cierra el frente y desvincula automáticamente a sus operarios de las rondas de mensajes.
-              </p>
-
+              <h3 className="text-sm font-semibold text-white mb-3">Frentes de Obra en Ejecución ({proyectos.length})</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                 {proyectos.map(p => {
                   const trabsEnObra = trabajadores.filter(t => t.proyecto_id === p.id)
@@ -698,18 +501,11 @@ export default function Home() {
                     <div key={p.id} className="p-3 bg-slate-950 rounded-lg border border-slate-800 flex flex-col justify-between">
                       <div>
                         <div className="font-semibold text-sky-400 text-xs">{p.nombre}</div>
-                        <div className="text-[11px] text-slate-500">{p.ubicacion}</div>
-                        <div className="mt-2 text-[11px] text-slate-400">
-                          👥 Operadores activos: <span className="font-bold text-white">{trabsEnObra.length}</span>
-                        </div>
+                        <div className="mt-2 text-[11px] text-slate-400">👥 Operadores en este frente: <span className="font-bold text-white">{trabsEnObra.length}</span></div>
                       </div>
-
                       <div className="mt-3 pt-2 border-t border-slate-800/60 flex justify-end">
-                        <button
-                          onClick={() => finalizarObra(p.id, p.nombre)}
-                          className="text-[11px] px-2.5 py-1 rounded bg-red-950/60 hover:bg-red-900/70 text-red-300 border border-red-800/60 font-medium transition"
-                        >
-                          🏁 Finalizar Obra
+                        <button onClick={() => finalizarObra(p.id, p.nombre)} className="text-[11px] px-2.5 py-1 rounded bg-red-950/60 text-red-300 border border-red-800/60 font-medium">
+                          🏁 Cerrar Obra
                         </button>
                       </div>
                     </div>
@@ -718,42 +514,24 @@ export default function Home() {
               </div>
             </div>
 
-            {/* LISTA DE OPERARIOS */}
+            {/* LISTA MAESTRA DE OPERARIOS */}
             <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
-              <h3 className="text-sm font-semibold text-white mb-3">Personal Registrado en Sistema ({trabajadores.length})</h3>
+              <h3 className="text-sm font-semibold text-white mb-3">Lista Maestra de Personal ({trabajadores.length})</h3>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
                   <thead className="bg-slate-950 border-b border-slate-800 text-slate-400">
-                    <tr>
-                      <th className="p-2.5">Nombre</th>
-                      <th className="p-2.5">Teléfono</th>
-                      <th className="p-2.5">Cargo</th>
-                      <th className="p-2.5">Frente de Obra</th>
-                      <th className="p-2.5">Jornada</th>
-                      <th className="p-2.5 text-right">Acciones</th>
-                    </tr>
+                    <tr><th className="p-2.5">Nombre</th><th className="p-2.5">Teléfono</th><th className="p-2.5">Cargo</th><th className="p-2.5">Frente Actual</th><th className="p-2.5 text-right">Acciones</th></tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/40">
                     {trabajadores.map(t => (
                       <tr key={t.id} className="hover:bg-slate-800/20">
-                        <td className="p-2.5 font-medium text-white">{t.nombre}</td>
+                        <td className="p-2.5 font-medium text-white">{t.nombre} {!t.activo && <span className="text-[9px] bg-slate-800 px-1 rounded ml-1 text-slate-400">Inactivo</span>}</td>
                         <td className="p-2.5 text-slate-300">+{t.telefono}</td>
                         <td className="p-2.5 text-slate-400">{t.cargo}</td>
-                        <td className="p-2.5 font-semibold text-sky-400">{t.proyectos?.nombre || 'General'}</td>
-                        <td className="p-2.5 text-slate-400">{t.jornada}</td>
+                        <td className="p-2.5 font-semibold text-sky-400">{t.proyectos?.nombre || 'Bolsa de Empleo (Sin Obra)'}</td>
                         <td className="p-2.5 text-right space-x-2">
-                          <button
-                            onClick={() => setEditandoTrabajador(t)}
-                            className="text-sky-400 hover:text-sky-300 font-medium px-2 py-1 rounded bg-sky-950/50 border border-sky-800/50"
-                          >
-                            ✏️ Editar
-                          </button>
-                          <button
-                            onClick={() => eliminarTrabajador(t.id, t.nombre)}
-                            className="text-red-400 hover:text-red-300 font-medium px-2 py-1 rounded bg-red-950/50 border border-red-800/50"
-                          >
-                            🗑️ Borrar
-                          </button>
+                          <button onClick={() => setEditandoTrabajador(t)} className="text-sky-400 hover:text-sky-300 font-medium px-2 py-1 rounded bg-sky-950/50 border border-sky-800/50">✏️ Editar</button>
+                          <button onClick={() => eliminarTrabajador(t.id, t.nombre)} className="text-red-400 hover:text-red-300 font-medium px-2 py-1 rounded bg-red-950/50 border border-red-800/50">🗑️ Borrar</button>
                         </td>
                       </tr>
                     ))}
@@ -761,6 +539,7 @@ export default function Home() {
                 </table>
               </div>
             </div>
+
           </div>
         )}
       </main>
