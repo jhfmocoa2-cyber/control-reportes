@@ -57,7 +57,7 @@ export default function Home() {
   const [cargo, setCargo] = useState('Perforador')
   const [mostrarDirectorio, setMostrarDirectorio] = useState(false)
 
-  // Directorio Único (sin duplicados de teléfono)
+  // Directorio Único
   const directorioUnico = Array.from(new Map(trabajadores.map(t => [t.telefono, t])).values())
 
   // Formulario nuevo proyecto
@@ -93,6 +93,41 @@ export default function Home() {
   async function toggleActivoTrabajador(id: string, estadoActual: boolean) {
     await supabase.from('trabajadores').update({ activo: !estadoActual }).eq('id', id)
     cargarDatos()
+  }
+
+  async function dispararRondaAhora() {
+    setEjecutando(true)
+    setMensajeEstado('Enviando mensajes de WhatsApp a los operarios activos...')
+    try {
+      const res = await fetch('/api/cron/solicitar-reportes')
+      const data = await res.json()
+      if (data.status === 'reminders_sent') {
+        setMensajeEstado('✅ Ronda enviada con éxito a todos los frentes activos.')
+      } else {
+        setMensajeEstado(`ℹ️ Estado: ${data.status}`)
+      }
+      cargarDatos()
+    } catch (err: any) {
+      setMensajeEstado(`❌ Error al enviar: ${err.message}`)
+    } finally {
+      setEjecutando(false)
+      setTimeout(() => setMensajeEstado(''), 6000)
+    }
+  }
+
+  async function dispararConsolidadoAhora() {
+    setEjecutando(true)
+    setMensajeEstado('Enviando consolidado a Don Jaime y Miguel...')
+    try {
+      const res = await fetch('/api/cron/enviar-consolidado')
+      const data = await res.json()
+      setMensajeEstado(`✅ Consolidado despachado a ${data.recipients || 2} administradores.`)
+    } catch (err: any) {
+      setMensajeEstado(`❌ Error al enviar: ${err.message}`)
+    } finally {
+      setEjecutando(false)
+      setTimeout(() => setMensajeEstado(''), 6000)
+    }
   }
 
   async function crearProyecto(e: React.FormEvent) {
@@ -150,11 +185,9 @@ export default function Home() {
 
     const telLimpio = telefono.replace(/\D/g, '')
 
-    // 1. Buscamos si el trabajador ya existe en el directorio
     const { data: existente } = await supabase.from('trabajadores').select('id').eq('telefono', telLimpio).maybeSingle()
 
     if (existente) {
-      // 2. Si existe, lo REASIGNAMOS (Update)
       const { error } = await supabase.from('trabajadores').update({
         nombre: nombre.trim(),
         proyecto_id: proyectoId,
@@ -166,7 +199,6 @@ export default function Home() {
       
       if (error) { alert(`❌ Error al reasignar: ${error.message}`); return }
     } else {
-      // 3. Si es nuevo, lo INSERTAMOS
       const { error } = await supabase.from('trabajadores').insert({
         nombre: nombre.trim(),
         telefono: telLimpio,
@@ -254,8 +286,13 @@ export default function Home() {
       </header>
 
       <main className="flex-1 p-6 max-w-7xl w-full mx-auto">
-        
-        {/* MODAL EDITAR OPERADOR (Se mantiene igual) */}
+        {mensajeEstado && (
+          <div className="mb-4 p-3 bg-sky-950/80 border border-sky-600 text-sky-200 text-xs rounded-lg flex items-center justify-between">
+            <span>{mensajeEstado}</span>
+          </div>
+        )}
+
+        {/* MODAL EDITAR OPERADOR */}
         {editandoTrabajador && (
           <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 max-w-md w-full text-xs shadow-2xl">
@@ -310,26 +347,107 @@ export default function Home() {
             <div className="flex flex-wrap justify-between items-center gap-3">
               <div>
                 <h2 className="text-base font-semibold text-white">Control de Jornada Diaria</h2>
+                <p className="text-xs text-slate-400">Inicio de ronda: 6:30 PM | Consolidado: 8:00 PM</p>
               </div>
-              <button onClick={cargarDatos} className="text-xs bg-slate-800 px-3 py-1.5 rounded-md">🔄 Actualizar</button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  disabled={ejecutando}
+                  onClick={dispararRondaAhora}
+                  className="text-xs bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-medium px-3 py-1.5 rounded-md transition shadow"
+                >
+                  🚀 Disparar Ronda Ahora
+                </button>
+                <button
+                  disabled={ejecutando}
+                  onClick={dispararConsolidadoAhora}
+                  className="text-xs bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-medium px-3 py-1.5 rounded-md transition shadow"
+                >
+                  📲 Enviar Consolidado a Jefatura
+                </button>
+                <button
+                  onClick={cargarDatos}
+                  className="text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded-md transition"
+                >
+                  🔄 Actualizar
+                </button>
+              </div>
             </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {trabajadores.map(t => {
                 const reporteHoy = haReportadoHoy(t.id)
+                const esperandoReporte = t.estado_conversacion === 'esperando_reporte_diario'
+
                 return (
-                  <div key={t.id} className={`border rounded-xl p-4 bg-slate-900/60 transition ${!t.activo ? 'border-slate-800 opacity-60' : reporteHoy ? 'border-emerald-500/40 bg-emerald-950/10' : 'border-amber-500/40 bg-amber-950/10'}`}>
+                  <div
+                    key={t.id}
+                    className={`border rounded-xl p-4 bg-slate-900/60 flex flex-col justify-between transition ${
+                      !t.activo
+                        ? 'border-slate-800 opacity-60'
+                        : reporteHoy
+                        ? 'border-emerald-500/40 bg-emerald-950/10'
+                        : 'border-amber-500/40 bg-amber-950/10'
+                    }`}
+                  >
                     <div>
                       <div className="flex justify-between items-start gap-2 mb-2">
                         <div>
                           <h3 className="font-semibold text-sm text-white">{t.nombre}</h3>
                           <p className="text-xs text-slate-400">+{t.telefono} • {t.cargo}</p>
                         </div>
-                        {!t.activo ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">Pausado</span> : reporteHoy ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800">Reportado</span> : <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-950 text-amber-400 border border-amber-800">Pendiente</span>}
+                        {!t.activo ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
+                            Pausado hoy
+                          </span>
+                        ) : reporteHoy ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Reportado
+                          </span>
+                        ) : esperandoReporte ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-sky-950 text-sky-400 border border-sky-800 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-ping" /> Contactado
+                          </span>
+                        ) : (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-950 text-amber-400 border border-amber-800 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" /> Pendiente
+                          </span>
+                        )}
                       </div>
+
                       <div className="text-xs text-slate-300 mt-2 bg-slate-950/40 p-2.5 rounded border border-slate-800/80">
-                        <div className="text-[11px] text-slate-400">Frente:</div>
+                        <div className="text-[11px] text-slate-400">Frente de Trabajo:</div>
                         <div className="font-medium text-sky-400">{t.proyectos?.nombre || 'General'}</div>
-                        {reporteHoy && <div className="mt-2 pt-2 border-t border-slate-800/60"><div className="text-[11px] text-emerald-400 font-medium">Avance:</div><div className="text-[11px] text-slate-300 truncate mt-0.5">{reporteHoy.observaciones}</div></div>}
+
+                        {reporteHoy && (
+                          <div className="mt-2 pt-2 border-t border-slate-800/60">
+                            <div className="text-[11px] text-emerald-400 font-medium">Avance asentado:</div>
+                            <div className="text-[11px] text-slate-300 line-clamp-2 mt-0.5">
+                              {reporteHoy.observaciones || 'Reporte consolidado'}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 pt-3 border-t border-slate-800/80 flex justify-between items-center text-xs">
+                      <span className="text-[11px] text-slate-500">Jornada: {t.jornada}</span>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setEditandoTrabajador(t)}
+                          className="text-[11px] text-sky-400 hover:text-sky-300 underline"
+                        >
+                          Editar
+                        </button>
+                        <button
+                          onClick={() => toggleActivoTrabajador(t.id, t.activo)}
+                          className={`text-[11px] px-2.5 py-1 rounded transition font-medium ${
+                            t.activo
+                              ? 'bg-red-950/40 hover:bg-red-900/50 text-red-300 border border-red-800/50'
+                              : 'bg-emerald-950/40 hover:bg-emerald-900/50 text-emerald-300 border border-emerald-800/50'
+                          }`}
+                        >
+                          {t.activo ? 'Pausar hoy' : 'Activar'}
+                        </button>
                       </div>
                     </div>
                   </div>
