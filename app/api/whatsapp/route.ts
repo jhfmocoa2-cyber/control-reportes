@@ -43,7 +43,7 @@ export async function POST(req: Request) {
 
     const nombreOperador = trabajador.nombre
     const frenteNombre = trabajador.proyectos?.nombre || 'General'
-    const tipoProyecto = trabajador.proyectos?.tipo_proyecto || 'general'
+    const tipoProyecto = trabajador.proyectos?.tipo_proyecto || 'pilotes'
     const estadoActual = trabajador.estado_conversacion || 'inactivo'
     const rawMemoria = (trabajador.borrador_reporte as any) || {}
     
@@ -52,7 +52,6 @@ export async function POST(req: Request) {
     const horaBogota = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Bogota" }))
     const esDomingo = horaBogota.getDay() === 0
     const horaDecimal = horaBogota.getHours() + (horaBogota.getMinutes() / 60)
-    const esHoraReporte = horaDecimal >= 16.5
     const horaFormateada = horaBogota.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
 
     const { data: reportesAnt } = await supabase.from('reportes_operativos')
@@ -147,7 +146,6 @@ export async function POST(req: Request) {
 
       const decisionIA = await consultarGroq(textoCrudo, nombreOperador, frenteNombre, tipoProyecto, currentBorrador.datos || {}, currentBorrador.historial || [], esDomingo, reporteUltimo, horaFormateada, esPrimerContacto)
 
-      // 🚨 AQUÍ ESTÁ EL AJUSTE EXACTO: Solo alerta a jefatura entre las 7 AM y antes de las 5 PM (17:00)
       if (decisionIA.alerta_jefatura && !currentBorrador.alerta_enviada && horaDecimal >= 7 && horaDecimal < 17) {
         await enviarWhatsApp(NUMERO_JEFATURA, `🚨 *ALERTA DE OBRA* 🚨\nEl perforador *${nombreOperador}* en *${frenteNombre}* reporta novedad crítica/dominical.\n\n*Mensaje:* "${textoCrudo}"`)
         nuevaMemoria.alerta_enviada = true
@@ -223,6 +221,15 @@ async function consultarGroq(mensaje: string, operador: string, frente: string, 
   const groqKey = (process.env.GROQ_API_KEY || '').trim()
   if (!groqKey) return { accion: 'conversar', respuesta_whatsapp: `⏳ Error de conexión.`, alerta_jefatura: false, posponer_reporte: false }
 
+  const esSuelos = tipoProyecto.toLowerCase().includes('suelo')
+  
+  // INYECCIÓN DINÁMICA DE REGLAS SEGÚN EL TIPO DE OBRA
+  const reglasEspecificas = esSuelos ? `
+4. REGLAS PARA ESTUDIOS DE SUELOS (¡CRÍTICO!): Estás en un proyecto de Estudio de Suelos. Habla estrictamente de "Sondeos". TIENES PROHIBIDO mencionar las palabras "pilote", "encamisado", "camisa", "prehueco" o "ensanche". Solo te importa el avance total del día. Si dicen "avancé 3 metros", acéptalo, pregunta si fue en SPT o NQ, anota el total y prepara el resumen final.
+  ` : `
+4. REGLAS PARA PILOTES (¡CRÍTICO!): Estás en un proyecto de Pilotes. Habla estrictamente de "Pilotes". Lo que más nos importa registrar es el encamisado. Si dicen "avancé 5 metros", NO asumas que es camisa, indaga: "¿Esos 5m fueron encamisando o haciendo prehueco/ensanche?". Guárdalo donde te indique y asume cero para las otras fases sin preguntar.
+  `
+
   const prompt = `
 Eres el Asistente de Bitácoras de JHF Perforaciones. Hablas por WhatsApp con el perforador "${operador}".
 Tono: Colega de obra natural y fluido. PROHIBIDO usar "Don", "Doña" o "QAP".
@@ -234,12 +241,11 @@ CONTEXTO DEL SISTEMA:
 - ES PRIMER CONTACTO EN ESTA OBRA: ${esPrimerContacto ? 'SÍ' : 'NO'}
 
 REGLAS DE INGENIERÍA:
-1. PRIMER CONTACTO (INVENTARIO BASE): Si "ES PRIMER CONTACTO" es SÍ, tu misión es levantar la línea base del proyecto. Debes indagar: 1) ¿Qué pilotes/sondeos ya están 100% terminados a la fecha? 2) ¿En qué punto están actualmente y cuántos metros acumulados llevan? TIENES PROHIBIDO pedir confirmación o cerrar la charla hasta tener este panorama completo. 
+1. PRIMER CONTACTO (INVENTARIO BASE): Si "ES PRIMER CONTACTO" es SÍ, tu misión es levantar la línea base del proyecto. Debes indagar: 1) ¿Qué puntos/perforaciones ya están 100% terminados a la fecha? 2) ¿En qué punto están actualmente y cuántos metros acumulados llevan? TIENES PROHIBIDO pedir confirmación o cerrar la charla hasta tener este panorama completo. 
 2. EL BUG DEL "SÍ": Si el operador dice "sí", "listo" o "ok" para confirmar el reporte que tú le resumiste, TIENES PROHIBIDO BORRAR LOS DATOS PREVIOS. Tu JSON debe devolver los mismos números exactos que tenías antes en "datos_previos", con accion="guardar_reporte".
 3. PROHIBIDO GUARDAR PREMATURAMENTE: Nunca uses accion="guardar_reporte" directamente. Siempre debes hacer un resumen general y usar accion="pedir_confirmacion". Solo cuando el operador diga "Sí" o "ok" a tu resumen, puedes usar "guardar_reporte".
-4. FOCO EN ENCAMISADO (PILOTES): Lo que más nos importa registrar es el encamisado. Si dicen "avancé 5 metros", NO asumas que es camisa, indaga: "¿Esos 5m fueron encamisando o haciendo prehueco/ensanche?". Guárdalo donde él te diga y no le preguntes obligatoriamente por las otras fases. Asume que son cero.
-5. ESTUDIO DE SUELOS: Solo nos importa el avance total.
-6. NOVEDADES CRÍTICAS: Si reportan varada o lluvia, activa "alerta_jefatura": true.
+${reglasEspecificas}
+5. NOVEDADES CRÍTICAS: Si reportan varada o lluvia, activa "alerta_jefatura": true.
 
 DATOS PREVIOS (MANTENLOS INTACTOS SI EL USUARIO ESTÁ CONFIRMANDO):
 ${JSON.stringify(datosPrevios)}
