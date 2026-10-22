@@ -65,7 +65,6 @@ export async function POST(req: Request) {
     const reporteUltimo = reportesAnt?.[0] || null
     const esPrimerContacto = !reporteUltimo
 
-    // ESCUDO: VERIFICAR SI YA REPORTÓ HOY
     let yaReportoHoy = false
     if (reporteUltimo) {
       const options = { timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit' } as const
@@ -78,8 +77,6 @@ export async function POST(req: Request) {
     const textoLimpio = normalizarTexto(textoCrudo)
     const esBotonMeta = message.type === 'button' || message.type === 'interactive' || textoLimpio.includes('confirmar recepcion')
 
-    // 🚨 MODO NO MOLESTAR (DO NOT DISTURB) 🚨
-    // Si ya reportó hoy, está inactivo y no oprimió el botón, ignora todo (a menos que quiera corregir).
     if (estadoActual === 'inactivo' && yaReportoHoy && !esBotonMeta) {
       if (!/\b(reiniciar|empezar de nuevo|borrar todo|corregir)\b/i.test(textoLimpio)) {
         return NextResponse.json({ status: 'ignored_already_reported_today' })
@@ -113,7 +110,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'welcome_sent' })
     }
 
-    // EL ESCUDO DE CORTESÍA AHORA INCLUYE "SALUDOS"
     if (estadoActual === 'inactivo' && esMensajeCortesia(textoLimpio)) {
       return NextResponse.json({ status: 'ignored_courtesy_loop' })
     }
@@ -151,7 +147,8 @@ export async function POST(req: Request) {
 
       const decisionIA = await consultarGroq(textoCrudo, nombreOperador, frenteNombre, tipoProyecto, currentBorrador.datos || {}, currentBorrador.historial || [], esDomingo, reporteUltimo, horaFormateada, esPrimerContacto)
 
-      if (decisionIA.alerta_jefatura && !currentBorrador.alerta_enviada) {
+      // 🚨 AQUÍ ESTÁ EL AJUSTE EXACTO: Solo alerta a jefatura entre las 7 AM y antes de las 5 PM (17:00)
+      if (decisionIA.alerta_jefatura && !currentBorrador.alerta_enviada && horaDecimal >= 7 && horaDecimal < 17) {
         await enviarWhatsApp(NUMERO_JEFATURA, `🚨 *ALERTA DE OBRA* 🚨\nEl perforador *${nombreOperador}* en *${frenteNombre}* reporta novedad crítica/dominical.\n\n*Mensaje:* "${textoCrudo}"`)
         nuevaMemoria.alerta_enviada = true
       }
