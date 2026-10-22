@@ -1,139 +1,42 @@
 import { NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
 
-const WHATSAPP_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || ''
-const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_ID || ''
+export const dynamic = 'force-dynamic'
 
-function obtenerInicioDiaColombiaUTC(): string {
-  const ahora = new Date()
-  const bogotaStr = ahora.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })
-  return `${bogotaStr}T05:00:00.000Z`
-}
-
-export async function GET() {
+export async function GET(req: Request) {
   try {
-    const { data: trabajadores } = await supabase
-      .from('trabajadores')
-      .select('*, proyectos(nombre)')
-      .eq('activo', true)
-
-    if (!trabajadores || trabajadores.length === 0) {
-      return NextResponse.json({ status: 'no_active_workers', count: 0, resultados: [] })
+    const authHeader = req.headers.get('authorization');
+    if (process.env.CRON_SECRET && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+      // return new Response('Unauthorized', { status: 401 }) // Descomentar en producción estricta
     }
 
-    const inicioDiaColombia = obtenerInicioDiaColombiaUTC()
-    let enviados = 0
-    const resultados: any[] = []
+    const horaBogota = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Bogota" }))
+    const hoyStr = horaBogota.toISOString().split('T')[0]
+    
+    // 1. Obtener personal activo
+    const { data: trabajadores } = await supabase.from('trabajadores').select('*').eq('activo', true).not('proyecto_id', 'is', null)
+    if (!trabajadores) return NextResponse.json({ status: 'no_workers' })
 
-    for (const t of trabajadores) {
-      const { data: reporteHoy } = await supabase
-        .from('reportes_operativos')
-        .select('id')
-        .eq('trabajador_id', t.id)
-        .gte('created_at', inicioDiaColombia)
-        .limit(1)
+    // 2. Obtener reportes de hoy
+    const { data: reportesHoy } = await supabase.from('reportes_operativos').select('trabajador_id').gte('created_at', `${hoyStr}T00:00:00`)
+    const reportadosIds = new Set(reportesHoy?.map(r => r.trabajador_id) || [])
 
-      if (!reporteHoy || reporteHoy.length === 0) {
-        const frente = t.proyectos?.nombre || 'su frente asignado'
-        const mensajeTexto = 
-          `👋 *Hola, ${t.nombre}.*\n` +
-          `Te saluda el Sistema de Control Operativo de *JHF Perforaciones S.A.S.*\n\n` +
-          `¿Cómo les fue hoy en *${frente}*? Por favor cuéntanos qué avance tuvieron en metros o novedades en obra para la bitácora diaria.`
+    // 3. Filtrar los que faltan
+    const faltantes = trabajadores.filter(t => !reportadosIds.has(t.id))
 
-        // 1. Envío con la plantilla aprobada en Meta (notificacion_sistema_jhf)
-        let resEnvio = await enviarPlantillaMeta(t.telefono, 'notificacion_sistema_jhf', 'es')
-
-        // 2. Respaldo por texto libre si la ventana ya estuviera abierta
-        if (!resEnvio.ok) {
-          resEnvio = await enviarTextoLibre(t.telefono, mensajeTexto)
-        }
-
-        if (resEnvio.ok) {
-          await supabase.from('trabajadores').update({
-            estado_conversacion: 'esperando_reporte_diario',
-            bienvenida_enviada: true
-          }).eq('id', t.id)
-          enviados++
-          resultados.push({ operador: t.nombre, telefono: t.telefono, entregado: true, metodo: resEnvio.metodo })
-        } else {
-          resultados.push({ operador: t.nombre, telefono: t.telefono, entregado: false, error: resEnvio.error })
-        }
-      }
+    // 4. Enviar mensaje
+    const token = (process.env.WHATSAPP_ACCESS_TOKEN || '').trim()
+    for (const t of faltantes) {
+      const msj = `🔔 ¡Hola ${t.nombre}! Pasaba a recordarte que aún no tenemos tu reporte de avance de hoy. Escríbeme cuando tengas un tiempito para dejar la bitácora al día.`
+      await fetch('https://graph.facebook.com/v19.0/1370874296109664/messages', {
+        method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messaging_product: 'whatsapp', to: `57${t.telefono}`, type: 'text', text: { body: msj } })
+      })
+      await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte' }).eq('id', t.id)
     }
 
-    return NextResponse.json({
-      status: 'round_triggered',
-      total_enviados: enviados,
-      resultados
-    })
+    return NextResponse.json({ status: 'reminders_sent', count: faltantes.length })
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 })
-  }
-}
-
-async function enviarPlantillaMeta(to: string, templateName: string, langCode: string): Promise<{ ok: boolean; metodo?: string; error?: string }> {
-  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) return { ok: false, error: 'Credenciales ausentes' }
-
-  const cleanTo = to.replace(/\D/g, '')
-  const recipient = cleanTo.startsWith('57') ? cleanTo : `57${cleanTo}`
-
-  try {
-    const res = await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: recipient,
-        type: 'template',
-        template: {
-          name: templateName,
-          language: { code: langCode }
-        }
-      })
-    })
-
-    const data = await res.json()
-    if (!res.ok || data.error) {
-      return { ok: false, error: data.error?.message || 'Error en plantilla' }
-    }
-    return { ok: true, metodo: `plantilla_${templateName}_${langCode}` }
-  } catch (e: any) {
-    return { ok: false, error: e.message }
-  }
-}
-
-async function enviarTextoLibre(to: string, text: string): Promise<{ ok: boolean; metodo?: string; error?: string }> {
-  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) return { ok: false, error: 'Credenciales ausentes' }
-
-  const cleanTo = to.replace(/\D/g, '')
-  const recipient = cleanTo.startsWith('57') ? cleanTo : `57${cleanTo}`
-
-  try {
-    const res = await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: recipient,
-        type: 'text',
-        text: { body: text }
-      })
-    })
-
-    const data = await res.json()
-    if (!res.ok || data.error) {
-      return { ok: false, error: data.error?.message || 'Error enviando texto' }
-    }
-    return { ok: true, metodo: 'texto_directo' }
-  } catch (e: any) {
-    return { ok: false, error: e.message }
   }
 }
