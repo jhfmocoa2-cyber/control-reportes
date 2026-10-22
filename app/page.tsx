@@ -9,6 +9,7 @@ interface Proyecto {
   id: string
   nombre: string
   ubicacion: string
+  tipo_proyecto?: string
 }
 
 interface Trabajador {
@@ -49,7 +50,6 @@ export default function Home() {
   const [ejecutando, setEjecutando] = useState(false)
   const [mensajeEstado, setMensajeEstado] = useState('')
 
-  // Formulario nuevo trabajador
   const [nombre, setNombre] = useState('')
   const [telefono, setTelefono] = useState('')
   const [proyectoId, setProyectoId] = useState('')
@@ -57,15 +57,13 @@ export default function Home() {
   const [cargo, setCargo] = useState('Perforador')
   const [mostrarDirectorio, setMostrarDirectorio] = useState(false)
 
-  // Directorio Único
   const directorioUnico = Array.from(new Map(trabajadores.map(t => [t.telefono, t])).values())
   const trabajadoresFiltrados = directorioUnico.filter(t => t.nombre.toLowerCase().includes(nombre.toLowerCase()))
 
-  // Formulario nuevo proyecto
   const [nombreProyecto, setNombreProyecto] = useState('')
   const [ubicacionProyecto, setUbicacionProyecto] = useState('')
+  const [tipoProyecto, setTipoProyecto] = useState('pilotes')
 
-  // Modal de edición
   const [editandoTrabajador, setEditandoTrabajador] = useState<Trabajador | null>(null)
 
   useEffect(() => {
@@ -137,7 +135,8 @@ export default function Home() {
 
     const { error } = await supabase.from('proyectos').insert({
       nombre: nombreProyecto.trim(),
-      ubicacion: ubicacionProyecto.trim() || 'General'
+      ubicacion: ubicacionProyecto.trim() || 'General',
+      tipo_proyecto: tipoProyecto
     })
 
     if (error) {
@@ -148,6 +147,7 @@ export default function Home() {
     alert('✅ ¡Obra guardada exitosamente!')
     setNombreProyecto('')
     setUbicacionProyecto('')
+    setTipoProyecto('pilotes')
     cargarDatos()
   }
 
@@ -293,7 +293,6 @@ export default function Home() {
           </div>
         )}
 
-        {/* MODAL EDITAR OPERADOR */}
         {editandoTrabajador && (
           <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 max-w-md w-full text-xs shadow-2xl">
@@ -342,7 +341,6 @@ export default function Home() {
           </div>
         )}
 
-        {/* MONITOR */}
         {tab === 'monitor' && (
           <div className="space-y-6">
             <div className="flex flex-wrap justify-between items-center gap-3">
@@ -458,7 +456,6 @@ export default function Home() {
           </div>
         )}
 
-        {/* BITACORA */}
         {tab === 'bitacora' && (
           <div className="space-y-4">
             <div className="flex justify-between items-center">
@@ -490,29 +487,34 @@ export default function Home() {
           </div>
         )}
 
-        {/* CONFIGURACIÓN */}
         {tab === 'configuracion' && (
           <div className="space-y-6">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               
-              {/* CREAR OBRA */}
               <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
                 <h3 className="text-sm font-semibold text-white mb-1">1. Crear Frente de Trabajo / Proyecto</h3>
-                <p className="text-xs text-slate-400 mb-4">Crea la obra para poder asignarla al personal.</p>
-                <form onSubmit={crearProyecto} className="space-y-3 text-xs">
+                <form onSubmit={crearProyecto} className="space-y-3 text-xs mt-4">
                   <div>
                     <label className="block text-slate-400 mb-1">Nombre del Proyecto / Obra *</label>
                     <input type="text" required value={nombreProyecto} onChange={e => setNombreProyecto(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500" />
                   </div>
-                  <div>
-                    <label className="block text-slate-400 mb-1">Ubicación / Tramo</label>
-                    <input type="text" value={ubicacionProyecto} onChange={e => setUbicacionProyecto(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500" />
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-slate-400 mb-1">Ubicación / Tramo</label>
+                      <input type="text" value={ubicacionProyecto} onChange={e => setUbicacionProyecto(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500" />
+                    </div>
+                    <div>
+                      <label className="block text-slate-400 mb-1">Tipo de Proyecto *</label>
+                      <select value={tipoProyecto} onChange={e => setTipoProyecto(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500">
+                        <option value="pilotes">Pilotes</option>
+                        <option value="estudio_suelos">Estudio de Suelos</option>
+                      </select>
+                    </div>
                   </div>
                   <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2 rounded transition mt-2 shadow">➕ Guardar Proyecto</button>
                 </form>
               </div>
 
-              {/* REGISTRAR OPERADOR (CON AUTOCOMPLETADO) */}
               <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40">
                 <h3 className="text-sm font-semibold text-white mb-1">2. Asignar Operador a Proyecto</h3>
                 <p className="text-xs text-slate-400 mb-4">Usa el directorio para cargar operarios antiguos o crea uno nuevo.</p>
@@ -543,7 +545,6 @@ export default function Home() {
                       className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500"
                     />
 
-                    {/* CAJA FLOTANTE DEL DIRECTORIO BLINDADA */}
                     {mostrarDirectorio && (
                       <div className="absolute z-50 w-full mt-1 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl overflow-hidden">
                         <div className="flex justify-between items-center bg-slate-800 px-3 py-2 border-b border-slate-700">
@@ -624,7 +625,6 @@ export default function Home() {
               </div>
             </div>
 
-            {/* FRENTES DE OBRA */}
             <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40 mt-6">
               <h3 className="text-sm font-semibold text-white mb-3">Frentes de Obra en Ejecución ({proyectos.length})</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -634,6 +634,7 @@ export default function Home() {
                     <div key={p.id} className="p-3 bg-slate-950 rounded-lg border border-slate-800 flex flex-col justify-between">
                       <div>
                         <div className="font-semibold text-sky-400 text-xs">{p.nombre}</div>
+                        <div className="text-[10px] text-slate-500 capitalize">{p.tipo_proyecto === 'estudio_suelos' ? 'Estudio de Suelos' : 'Pilotes'}</div>
                         <div className="mt-2 text-[11px] text-slate-400">👥 Operadores en este frente: <span className="font-bold text-white">{trabsEnObra.length}</span></div>
                       </div>
                       <div className="mt-3 pt-2 border-t border-slate-800/60 flex justify-end">
@@ -647,7 +648,6 @@ export default function Home() {
               </div>
             </div>
 
-            {/* LISTA MAESTRA DE OPERARIOS */}
             <div className="border border-slate-800 rounded-xl p-5 bg-slate-900/40 mt-6">
               <h3 className="text-sm font-semibold text-white mb-3">Lista Maestra de Personal ({trabajadores.length})</h3>
               <div className="overflow-x-auto">
