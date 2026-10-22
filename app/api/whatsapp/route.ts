@@ -95,7 +95,7 @@ export async function POST(req: Request) {
       
       let msjArranque = ''
       if (esPrimerContacto) {
-        msjArranque = `👋 ¡Qué más ${nombreOperador}! Arrancamos a reportar en este proyecto de *${frenteNombre}*.\n\nPara ponerme al día: al corte de hoy, ¿ya llevamos algún punto finalizado o en qué avance vamos?`
+        msjArranque = `👋 ¡Qué más ${nombreOperador}! Arrancamos a reportar en este proyecto de *${frenteNombre}*.\n\nPara ponerme al día: al corte de hoy, ¿en qué punto estamos trabajando y qué logramos hacer?`
       } else {
         msjArranque = `👋 ¡Hola ${nombreOperador}! Espero que todo haya salido excelente en *${frenteNombre}* hoy.\n\n`
         if (tipoProyecto.toLowerCase().includes('pilote')) {
@@ -158,7 +158,7 @@ export async function POST(req: Request) {
       }
 
       if (decisionIA.accion === 'guardar_reporte') {
-        const dataFinal = (decisionIA.avance_hoy?.metros_pq || decisionIA.avance_hoy?.metros_ensanche || decisionIA.avance_hoy?.metros_camisa || decisionIA.avance_hoy?.metros_nq_spt || decisionIA.avance_hoy?.tipo === 'standby') 
+        const dataFinal = (decisionIA.avance_hoy?.metros_pq || decisionIA.avance_hoy?.metros_ensanche || decisionIA.avance_hoy?.metros_camisa || decisionIA.avance_hoy?.metros_nq_spt || decisionIA.avance_hoy?.tipo === 'standby' || decisionIA.avance_hoy?.tipo === 'logistica') 
                           ? decisionIA 
                           : currentBorrador.datos;
 
@@ -223,11 +223,10 @@ async function consultarGroq(mensaje: string, operador: string, frente: string, 
 
   const esSuelos = tipoProyecto.toLowerCase().includes('suelo')
   
-  // INYECCIÓN DINÁMICA DE REGLAS SEGÚN EL TIPO DE OBRA
   const reglasEspecificas = esSuelos ? `
-4. REGLAS PARA ESTUDIOS DE SUELOS (¡CRÍTICO!): Estás en un proyecto de Estudio de Suelos. Habla estrictamente de "Sondeos". TIENES PROHIBIDO mencionar las palabras "pilote", "encamisado", "camisa", "prehueco" o "ensanche". Solo te importa el avance total del día. Si dicen "avancé 3 metros", acéptalo, pregunta si fue en SPT o NQ, anota el total y prepara el resumen final.
+4. REGLAS PARA ESTUDIOS DE SUELOS: Estás en un proyecto de Estudio de Suelos. Habla de "Sondeos". PROHIBIDO mencionar "pilote", "encamisado", "camisa", "prehueco". Si reportan metros de avance, anótalos y pregunta si fue SPT o NQ (a menos que ya lo hayan dicho).
   ` : `
-4. REGLAS PARA PILOTES (¡CRÍTICO!): Estás en un proyecto de Pilotes. Habla estrictamente de "Pilotes". Lo que más nos importa registrar es el encamisado. Si dicen "avancé 5 metros", NO asumas que es camisa, indaga: "¿Esos 5m fueron encamisando o haciendo prehueco/ensanche?". Guárdalo donde te indique y asume cero para las otras fases sin preguntar.
+4. REGLAS PARA PILOTES: Estás en un proyecto de Pilotes. Habla de "Pilotes". Si dicen "avancé 5 metros", indaga si fueron de camisa, prehueco o ensanche. Guárdalo donde te indique y asume cero para las otras fases sin preguntar.
   `
 
   const prompt = `
@@ -241,11 +240,12 @@ CONTEXTO DEL SISTEMA:
 - ES PRIMER CONTACTO EN ESTA OBRA: ${esPrimerContacto ? 'SÍ' : 'NO'}
 
 REGLAS DE INGENIERÍA:
-1. PRIMER CONTACTO (INVENTARIO BASE): Si "ES PRIMER CONTACTO" es SÍ, tu misión es levantar la línea base del proyecto. Debes indagar: 1) ¿Qué puntos/perforaciones ya están 100% terminados a la fecha? 2) ¿En qué punto están actualmente y cuántos metros acumulados llevan? TIENES PROHIBIDO pedir confirmación o cerrar la charla hasta tener este panorama completo. 
+1. PRIMER CONTACTO: Si "ES PRIMER CONTACTO" es SÍ, pregunta amigablemente en qué punto están trabajando hoy y si arrancan de cero o ya traen metros de antes. NO exijas saber "qué está 100% terminado" porque a veces apenas están instalando equipo. Sé natural y no los presiones.
 2. EL BUG DEL "SÍ": Si el operador dice "sí", "listo" o "ok" para confirmar el reporte que tú le resumiste, TIENES PROHIBIDO BORRAR LOS DATOS PREVIOS. Tu JSON debe devolver los mismos números exactos que tenías antes en "datos_previos", con accion="guardar_reporte".
 3. PROHIBIDO GUARDAR PREMATURAMENTE: Nunca uses accion="guardar_reporte" directamente. Siempre debes hacer un resumen general y usar accion="pedir_confirmacion". Solo cuando el operador diga "Sí" o "ok" a tu resumen, puedes usar "guardar_reporte".
 ${reglasEspecificas}
-5. NOVEDADES CRÍTICAS: Si reportan varada o lluvia, activa "alerta_jefatura": true.
+5. LOGÍSTICA / INSTALACIÓN (CERO METROS) [¡CRÍTICO!]: Si el operador indica que hoy SOLAMENTE instaló, buscó agua, movió equipo, o hizo logística, ASUME AUTOMÁTICAMENTE avance cero (0). Pon tipo="logistica". TIENES ESTRICTAMENTE PROHIBIDO preguntarle por metros, SPT, NQ, o camisas en este escenario. Simplemente acepta que hoy fue día de instalación, resume su comentario y pide confirmación para cerrar.
+6. NOVEDADES CRÍTICAS: Si reportan varada o lluvia, activa "alerta_jefatura": true.
 
 DATOS PREVIOS (MANTENLOS INTACTOS SI EL USUARIO ESTÁ CONFIRMANDO):
 ${JSON.stringify(datosPrevios)}
