@@ -55,7 +55,6 @@ export async function POST(req: Request) {
     const esHoraReporte = horaDecimal >= 16.5
     const horaFormateada = horaBogota.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
 
-    // DETECCIÓN DE PRIMER CONTACTO
     const { data: reportesAnt } = await supabase.from('reportes_operativos')
       .select('*')
       .eq('trabajador_id', trabajador.id)
@@ -63,11 +62,29 @@ export async function POST(req: Request) {
       .eq('confirmado', true)
       .order('created_at', { ascending: false }).limit(1)
       
-    const reporteAyer = reportesAnt?.[0] || null
-    const esPrimerContacto = !reporteAyer
+    const reporteUltimo = reportesAnt?.[0] || null
+    const esPrimerContacto = !reporteUltimo
+
+    // ESCUDO: VERIFICAR SI YA REPORTÓ HOY
+    let yaReportoHoy = false
+    if (reporteUltimo) {
+      const options = { timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit' } as const
+      const fechaUltimo = new Date(reporteUltimo.created_at).toLocaleDateString('es-CO', options)
+      const fechaHoyStr = horaBogota.toLocaleDateString('es-CO', options)
+      yaReportoHoy = (fechaUltimo === fechaHoyStr)
+    }
 
     const textoCrudo = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || ''
     const textoLimpio = normalizarTexto(textoCrudo)
+    const esBotonMeta = message.type === 'button' || message.type === 'interactive' || textoLimpio.includes('confirmar recepcion')
+
+    // 🚨 MODO NO MOLESTAR (DO NOT DISTURB) 🚨
+    // Si ya reportó hoy, está inactivo y no oprimió el botón, ignora todo (a menos que quiera corregir).
+    if (estadoActual === 'inactivo' && yaReportoHoy && !esBotonMeta) {
+      if (!/\b(reiniciar|empezar de nuevo|borrar todo|corregir)\b/i.test(textoLimpio)) {
+        return NextResponse.json({ status: 'ignored_already_reported_today' })
+      }
+    }
 
     if (/\b(reiniciar|empezar de nuevo|borrar todo|corregir)\b/i.test(textoLimpio)) {
       await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id, alerta_enviada: false } }).eq('id', trabajador.id)
@@ -75,14 +92,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'reset_flow' })
     }
 
-    const esBotonMeta = message.type === 'button' || message.type === 'interactive' || textoLimpio.includes('confirmar recepcion')
-    const esSaludo = textoLimpio.length <= 15 && /\b(hola|ola|buenas|que mas|saludos)\b/i.test(textoLimpio)
+    const esSaludo = textoLimpio.length <= 15 && /\b(hola|ola|buenas|que mas|buenos dias|buenas tardes)\b/i.test(textoLimpio)
     
     if (esBotonMeta || (esSaludo && estadoActual === 'inactivo')) {
       await supabase.from('trabajadores').update({ estado_conversacion: 'esperando_reporte', borrador_reporte: { datos: {}, historial: [], last_msg_id: message.id, alerta_enviada: false } }).eq('id', trabajador.id)
       
       let msjArranque = ''
-      
       if (esPrimerContacto) {
         msjArranque = `👋 ¡Qué más ${nombreOperador}! Arrancamos a reportar en este proyecto de *${frenteNombre}*.\n\nPara ponerme al día: al corte de hoy, ¿ya llevamos algún punto finalizado o en qué avance vamos?`
       } else {
@@ -98,7 +113,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: 'welcome_sent' })
     }
 
-    // EL ESCUDO DE CORTESÍA BLINDADO
+    // EL ESCUDO DE CORTESÍA AHORA INCLUYE "SALUDOS"
     if (estadoActual === 'inactivo' && esMensajeCortesia(textoLimpio)) {
       return NextResponse.json({ status: 'ignored_courtesy_loop' })
     }
@@ -134,7 +149,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ status: 'superseded_by_newer_message' })
       }
 
-      const decisionIA = await consultarGroq(textoCrudo, nombreOperador, frenteNombre, tipoProyecto, currentBorrador.datos || {}, currentBorrador.historial || [], esDomingo, reporteAyer, horaFormateada, esPrimerContacto)
+      const decisionIA = await consultarGroq(textoCrudo, nombreOperador, frenteNombre, tipoProyecto, currentBorrador.datos || {}, currentBorrador.historial || [], esDomingo, reporteUltimo, horaFormateada, esPrimerContacto)
 
       if (decisionIA.alerta_jefatura && !currentBorrador.alerta_enviada) {
         await enviarWhatsApp(NUMERO_JEFATURA, `🚨 *ALERTA DE OBRA* 🚨\nEl perforador *${nombreOperador}* en *${frenteNombre}* reporta novedad crítica/dominical.\n\n*Mensaje:* "${textoCrudo}"`)
@@ -207,7 +222,7 @@ async function guardarOActualizarReporte(trabajador: any, decisionIA: any, texto
   }
 }
 
-async function consultarGroq(mensaje: string, operador: string, frente: string, tipoProyecto: string, datosPrevios: any, historial: MensajeHistorial[], esDomingo: boolean, reporteAyer: any, horaFormateada: string, esPrimerContacto: boolean) {
+async function consultarGroq(mensaje: string, operador: string, frente: string, tipoProyecto: string, datosPrevios: any, historial: MensajeHistorial[], esDomingo: boolean, reporteUltimo: any, horaFormateada: string, esPrimerContacto: boolean) {
   const groqKey = (process.env.GROQ_API_KEY || '').trim()
   if (!groqKey) return { accion: 'conversar', respuesta_whatsapp: `⏳ Error de conexión.`, alerta_jefatura: false, posponer_reporte: false }
 
@@ -290,7 +305,7 @@ RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
         }
       } else {
         const data = await res.json()
-        logErrores.push(`[${modelo}:${res.status}]`)
+        logErrores.push(`[${modelo}: ${res.status}]`)
       }
     } catch (e: any) {
       logErrores.push(`[${modelo}: timeout]`)
@@ -303,8 +318,8 @@ RESPONDE ÚNICAMENTE CON UN OBJETO JSON VÁLIDO CON ESTA ESTRUCTURA EXACTA:
 function normalizarTexto(t: string): string { return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()¿?¡!]/g, '').trim() }
 
 function esMensajeCortesia(textoLimpio: string): boolean {
-  if (textoLimpio.length > 25) return false;
-  return /\b(ok|listo|gracias|amén|amen|chao|feliz noche|buenas noches|buena noche|👍|🙏|con gusto|de nada|vale|dale|bueno)\b/i.test(textoLimpio);
+  if (textoLimpio.length > 30) return false;
+  return /\b(ok|listo|gracias|amén|amen|chao|feliz noche|buenas noches|buena noche|👍|🙏|con gusto|de nada|vale|dale|bueno|saludos|hasta mañana|nos vemos|descanse)\b/i.test(textoLimpio);
 }
 
 async function enviarWhatsApp(to: string, text: string) {
