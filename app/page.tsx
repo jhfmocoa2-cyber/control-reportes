@@ -156,24 +156,25 @@ export default function Home() {
     const confirmar = confirm(
       `¿Deseas finalizar y cerrar la obra "${nombreObra}"?\n\n` +
       `⚠️ Acción:\n` +
-      `• Se darán de baja los ${totalTrabs} operarios asignados a este frente.\n` +
-      `• El bot no volverá a escribirles ni a incluirlos en los consolidados.\n` +
+      `• El proyecto se cerrará.\n` +
+      `• Los ${totalTrabs} operarios asignados pasarán a la Bolsa de Empleo (inactivos) y seguirán en tu directorio.\n` +
       `• El historial en la Bitácora se mantiene intacto.`
     )
 
     if (!confirmar) return
 
-    const { error: errTrabs } = await supabase.from('trabajadores').delete().eq('proyecto_id', id)
-    if (errTrabs) {
-      await supabase.from('trabajadores').update({ activo: false }).eq('proyecto_id', id)
-    }
+    // Salvavidas: Mueve a los trabajadores a la bolsa de empleo (null) y los desactiva
+    await supabase.from('trabajadores').update({ activo: false, proyecto_id: null }).eq('proyecto_id', id)
 
+    // Borra el proyecto de forma segura
     const { error: errProy } = await supabase.from('proyectos').delete().eq('id', id)
     if (errProy) {
       console.warn('Error al borrar obra:', errProy)
+      alert(`Hubo un error al borrar el proyecto, pero el personal está a salvo.`)
+    } else {
+      alert(`🏁 Obra "${nombreObra}" finalizada. El personal ha sido enviado a la Bolsa de Empleo.`)
     }
-
-    alert(`🏁 Obra "${nombreObra}" finalizada con éxito.`)
+    
     cargarDatos()
   }
 
@@ -319,7 +320,8 @@ export default function Home() {
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-slate-400 mb-1">Frente de Obra</label>
-                    <select required value={editandoTrabajador.proyecto_id} onChange={e => setEditandoTrabajador({ ...editandoTrabajador, proyecto_id: e.target.value })} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500">
+                    <select required value={editandoTrabajador.proyecto_id || ''} onChange={e => setEditandoTrabajador({ ...editandoTrabajador, proyecto_id: e.target.value })} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white outline-none focus:border-sky-500">
+                      <option value="">Bolsa de Empleo</option>
                       {proyectos.map(p => (<option key={p.id} value={p.id}>{p.nombre}</option>))}
                     </select>
                   </div>
@@ -373,7 +375,7 @@ export default function Home() {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {trabajadores.map(t => {
+              {trabajadores.filter(t => t.proyecto_id).map(t => {
                 const reporteHoy = haReportadoHoy(t.id)
                 const esperandoReporte = t.estado_conversacion === 'esperando_reporte_diario'
 
